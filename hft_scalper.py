@@ -305,10 +305,21 @@ class RiskManager:
         inventory_ratio = self.position / self.config.max_position if self.config.max_position > 0 else 0
         skew = inventory_ratio * self.config.skew_factor
         mid = tob.microprice
-        fee_offset = mid * (self.config.maker_fee_bps + self.config.min_profit_bps) / 10_000
-        half_spread = max(tob.spread / 2, fee_offset)
-        buy_price = round(mid - half_spread - skew * half_spread, 2)
-        sell_price = round(mid + half_spread - skew * half_spread, 2)
+
+        if self.position > 1e-12:
+            exit_offset = mid * (2 * self.config.maker_fee_bps + self.config.min_profit_bps) / 10_000
+            buy_price = round(tob.best_bid - self.config.tick_size, 2)
+            sell_price = round(max(self.avg_entry_price + exit_offset, tob.best_ask), 2)
+        elif self.position < -1e-12:
+            exit_offset = mid * (2 * self.config.maker_fee_bps + self.config.min_profit_bps) / 10_000
+            buy_price = round(min(self.avg_entry_price - exit_offset, tob.best_bid), 2)
+            sell_price = round(tob.best_ask + self.config.tick_size, 2)
+        else:
+            entry_offset = mid * 2.0 / 10_000
+            half_spread = max(tob.spread / 2, entry_offset)
+            buy_price = round(mid - half_spread - skew * half_spread, 2)
+            sell_price = round(mid + half_spread - skew * half_spread, 2)
+
         return buy_price, sell_price
 
     def update_drawdown(self, mid_price: float):
@@ -714,7 +725,7 @@ class HFTScalper:
 
         place_buy = True
         place_sell = True
-        if self.config.momentum_filter_enabled:
+        if self.config.momentum_filter_enabled and abs(self.risk.position) < 1e-12:
             if momentum == "up":
                 place_sell = False
             elif momentum == "down":
@@ -884,16 +895,16 @@ class HFTScalper:
             return
         try:
             connected = False
-            for attempt in range(5):
+            for attempt in range(7):
                 if attempt > 0:
-                    wait = 5 * (2 ** attempt)
-                    logger.warning(f"Kraken API validation attempt {attempt}/5 failed, retrying in {wait}s...")
+                    wait = 15 * (2 ** attempt)
+                    logger.warning(f"Kraken API validation attempt {attempt}/7 failed, retrying in {wait}s...")
                     time.sleep(wait)
                 if self._kraken.validate_connection():
                     connected = True
                     break
             if not connected:
-                logger.error("LIVE MODE: Kraken API connection failed after 5 attempts — falling back to paper mode")
+                logger.error("LIVE MODE: Kraken API connection failed after 7 attempts — falling back to paper mode")
                 self.config.live_mode = False
                 self.orders._live_mode = False
                 self.telegram.send_alert(

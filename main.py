@@ -11,23 +11,27 @@ from hft_scalper import HFTScalper, ScalperConfig
 from kraken_client import KrakenClient
 
 port = int(os.environ.get("PORT", 5000))
-for attempt in range(3):
+for attempt in range(5):
     try:
-        subprocess.run(["fuser", "-k", f"{port}/tcp"], capture_output=True, timeout=5)
-        time.sleep(2)
+        result = subprocess.run(["fuser", f"{port}/tcp"], capture_output=True, text=True, timeout=5)
+        if result.stdout.strip():
+            subprocess.run(["fuser", "-k", "-9", f"{port}/tcp"], capture_output=True, timeout=5)
+            time.sleep(2)
+        else:
+            break
     except Exception:
         pass
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    try:
-        s.bind(("0.0.0.0", port))
-        s.close()
-        break
-    except OSError:
-        s.close()
-        time.sleep(3)
-    
+    time.sleep(1)
 
 app = Flask(__name__)
+
+import werkzeug.serving
+original_make_server = werkzeug.serving.make_server
+def patched_make_server(*args, **kwargs):
+    server = original_make_server(*args, **kwargs)
+    server.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    return server
+werkzeug.serving.make_server = patched_make_server
 
 config = ScalperConfig(
     symbol="BTC/USDC",
@@ -37,7 +41,7 @@ config = ScalperConfig(
     starting_capital=16.0,
     order_qty=0.0001,
     max_spread_bps=50.0,
-    stale_order_ms=30000.0,
+    stale_order_ms=10000.0,
     max_position=0.01,
     max_open_orders=2,
     live_mode=True,
