@@ -1,11 +1,14 @@
 import asyncio
 import json
+import os
 import time
 import logging
+import threading
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional
 
+import requests
 import websockets
 
 logging.basicConfig(
@@ -14,6 +17,35 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 logger = logging.getLogger("HFTScalper")
+
+
+class TelegramNotifier:
+    def __init__(self):
+        self.token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+        self.chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
+        self.enabled = bool(self.token and self.chat_id)
+        if self.enabled:
+            logger.info("Telegram notifications enabled")
+        else:
+            logger.warning("Telegram notifications disabled — missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID")
+
+    def send(self, message: str):
+        if not self.enabled:
+            return
+        threading.Thread(target=self._send_sync, args=(message,), daemon=True).start()
+
+    def _send_sync(self, message: str):
+        try:
+            url = f"https://api.telegram.org/bot{self.token}/sendMessage"
+            resp = requests.post(url, json={
+                "chat_id": self.chat_id,
+                "text": message,
+                "parse_mode": "HTML",
+            }, timeout=5)
+            if not resp.ok:
+                logger.warning(f"Telegram send failed: {resp.status_code} {resp.text}")
+        except Exception as exc:
+            logger.warning(f"Telegram error: {exc}")
 
 
 class OrderSide(Enum):
@@ -200,6 +232,7 @@ class HFTScalper:
         self.tob = TopOfBook()
         self.risk = RiskManager(self.config)
         self.orders = OrderManager()
+        self.telegram = TelegramNotifier()
         self._running = False
         self._update_count = 0
 
@@ -276,6 +309,19 @@ class HFTScalper:
                 f"bal=${self.risk.balance:.2f} pos={self.risk.position:.6f} "
                 f"pnl={self.risk.pnl:.4f} return={self.risk.return_pct:.2f}% "
                 f"orders={self.orders.open_count}"
+            )
+            self.telegram.send(
+                f"<b>WildBot Scalper</b>\n"
+                f"{self.config.symbol} | Tick #{self._update_count}\n\n"
+                f"Bid: ${self.tob.best_bid:,.2f}\n"
+                f"Ask: ${self.tob.best_ask:,.2f}\n"
+                f"Spread: {spread_bps:.2f} bps\n\n"
+                f"Balance: ${self.risk.balance:,.2f}\n"
+                f"PnL: ${self.risk.pnl:,.4f}\n"
+                f"Return: {self.risk.return_pct:.2f}%\n"
+                f"Position: {self.risk.position:.6f}\n"
+                f"Trades: {self.risk.trade_count}\n"
+                f"Open Orders: {self.orders.open_count}"
             )
 
     async def _ws_loop(self):
