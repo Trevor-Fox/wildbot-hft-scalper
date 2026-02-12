@@ -6,6 +6,7 @@ import time
 
 from flask import Flask, jsonify, render_template
 from hft_scalper import HFTScalper, ScalperConfig
+from kraken_client import KrakenClient
 
 app = Flask(__name__)
 
@@ -13,15 +14,18 @@ config = ScalperConfig(
     symbol="BTC/USD",
     ws_url="wss://ws.kraken.com/v2",
     ws_symbol="BTC/USD",
+    rest_pair="XBTUSD",
     starting_capital=16.0,
     order_qty=0.001,
     max_spread_bps=10.0,
     stale_order_ms=500.0,
     max_position=0.01,
     max_open_orders=2,
+    live_mode=True,
 )
 
-scalper = HFTScalper(config)
+kraken = KrakenClient()
+scalper = HFTScalper(config, kraken_client=kraken)
 
 
 def run_scalper():
@@ -49,6 +53,7 @@ def api_status():
     mid = scalper.tob.mid_price
     return jsonify({
         "status": "running" if scalper._running else "stopped",
+        "live_mode": scalper.config.live_mode,
         "symbol": scalper.config.symbol,
         "starting_capital": scalper.risk.starting_capital,
         "balance": round(scalper.risk.balance, 2),

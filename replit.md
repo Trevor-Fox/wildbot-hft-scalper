@@ -1,48 +1,67 @@
 # WildBot HFT Scalper
 
 ## Overview
-WildBot is a high-frequency trading (HFT) scalping bot that connects to cryptocurrency exchanges via WebSocket for real-time order book data. It implements market-making strategies with built-in risk management, multiple trading strategies (microprice, inventory skew, momentum filter), and comprehensive analytics. Paper trading starts with $16 capital, with PnL updates sent to Telegram.
+WildBot is a high-frequency trading (HFT) scalping bot that connects to Kraken via WebSocket for real-time order book data. It implements market-making strategies with built-in risk management, multiple trading strategies (microprice, inventory skew, momentum filter), and comprehensive analytics. Supports both live trading on Kraken and paper trading modes with PnL updates sent to Telegram.
 
 ## Project Architecture
 
 ### Files
-- `main.py` — Entry point. Configures the scalper, Flask web server (HTML dashboard on `/`, JSON API on `/api/status`), and runs the async event loop in a background thread.
+- `main.py` — Entry point. Configures the scalper, Flask web server (HTML dashboard on `/`, JSON API on `/api/status`), and runs the async event loop in a background thread. Sets `live_mode=True` for real Kraken trading.
 - `hft_scalper.py` — Core HFT module containing:
-  - `HFTScalper` — Main orchestrator: WebSocket connection, tick processing, order lifecycle, Telegram notifications, EMA/momentum tracking
+  - `HFTScalper` — Main orchestrator: WebSocket connection, tick processing, order lifecycle, Telegram notifications, EMA/momentum tracking, live balance initialization
   - `TopOfBook` — L1 data structure (best bid/ask, quantities, spread, microprice)
-  - `RiskManager` — Position limits, spread filters, stale order detection (500ms timeout), affordability checks, mark-to-market equity, 50% max drawdown stop, average cost tracking, round-trip PnL, inventory skew pricing
-  - `OrderManager` — Order creation, cancellation, simulated fill checks with 200ms cooldown
-  - `ScalperConfig` — All tunable parameters (symbol, qty, spread threshold, strategies, etc.)
+  - `RiskManager` — Position limits, spread filters, stale order detection (500ms timeout), affordability checks (live-aware), mark-to-market equity, 50% max drawdown stop, average cost tracking, round-trip PnL, inventory skew pricing
+  - `OrderManager` — Dual-mode order management: paper (simulated fills) and live (Kraken REST API orders with exponential backoff on errors)
+  - `ScalperConfig` — All tunable parameters including `live_mode` and `rest_pair`
   - `TelegramNotifier` — Rate-limited notifications, alerts, daily summaries
-- `templates/dashboard.html` — Live-updating dark-themed trading dashboard (auto-refreshes every 2s)
+- `kraken_client.py` — Kraken REST API client with HMAC-SHA512 authentication for AddOrder, CancelOrder, CancelAll, Balance, OpenOrders, QueryOrders. Includes 200ms rate limiting between API calls.
+- `templates/dashboard.html` — Live-updating dark-themed trading dashboard with LIVE/PAPER mode indicator (auto-refreshes every 2s)
 
 ### Key Features
-1. **WebSocket streaming** — Real-time order book depth via `websockets` library (Kraken v2 API)
-2. **Market making** — Simultaneous limit buy/sell with inventory-skewed pricing
-3. **Microprice** — Volume-weighted fair price from order book for smarter order placement
-4. **Inventory Skew** — Biases prices based on current position to reduce inventory risk
-5. **Momentum Filter** — EMA-based trend detection; skips orders against strong moves
-6. **Risk management** — 500ms stale order cancellation, position limits, spread filter, affordability checks, 50% drawdown auto-stop
-7. **Fill cooldown** — 200ms minimum between fills to prevent cascading; max 1 fill per tick
-8. **Average cost tracking** — Weighted average entry price for accurate unrealized PnL
-9. **Round-trip PnL** — Win/loss counted on complete position round-trips (position returns to zero), not per-fill
-10. **Mark-to-market equity** — Balance + position_value for accurate return tracking
-11. **Session statistics** — Win/loss tracking, win rate, peak equity, max drawdown monitoring
-12. **Telegram notifications** — Rate-limited PnL updates (60s), critical alerts (5s cooldown), daily summary
-13. **Trade history** — Last 50 trades stored, last 20 displayed on dashboard
-14. **Live dashboard** — Professional dark-themed HTML dashboard with strategy indicators, trade table, auto-refresh
-15. **Async architecture** — `asyncio` for non-blocking high-speed data processing
-16. **Reconnect logic** — Exponential backoff on disconnection
+1. **Live Trading** — Real order placement on Kraken via REST API with proper authentication
+2. **Paper Trading** — Simulated fills for strategy testing without risk
+3. **WebSocket streaming** — Real-time order book depth via `websockets` library (Kraken v2 API)
+4. **Market making** — Simultaneous limit buy/sell with inventory-skewed pricing
+5. **Microprice** — Volume-weighted fair price from order book for smarter order placement
+6. **Inventory Skew** — Biases prices based on current position to reduce inventory risk
+7. **Momentum Filter** — EMA-based trend detection; skips orders against strong moves
+8. **Risk management** — 500ms stale order cancellation, position limits, spread filter, affordability checks, 50% drawdown auto-stop
+9. **Fill cooldown** — 200ms minimum between fills to prevent cascading; max 1 fill per tick
+10. **Average cost tracking** — Weighted average entry price for accurate unrealized PnL
+11. **Round-trip PnL** — Win/loss counted on complete position round-trips
+12. **Mark-to-market equity** — Balance + position_value for accurate return tracking
+13. **Session statistics** — Win/loss tracking, win rate, peak equity, max drawdown monitoring
+14. **Telegram notifications** — Rate-limited PnL updates (60s), critical alerts (5s cooldown), daily summary
+15. **Trade history** — Last 50 trades stored, last 20 displayed on dashboard
+16. **Live dashboard** — Professional dark-themed HTML dashboard with LIVE/PAPER badge, strategy indicators, trade table, auto-refresh
+17. **Async architecture** — `asyncio` for non-blocking high-speed data processing
+18. **Reconnect logic** — Exponential backoff on disconnection
+19. **API error handling** — Exponential backoff on Kraken API errors (2s → 60s), graceful fallback to paper mode on connection failure
+
+### Live Trading Mode
+- Set `live_mode=True` in ScalperConfig to enable real trading
+- Requires `KRAKEN_API_KEY` and `KRAKEN_API_SECRET` environment secrets
+- API key needs "Create & modify orders" and "Query open orders & trades" permissions
+- On startup, fetches real USD and BTC balance from Kraken
+- Places real limit orders via Kraken REST API (`/0/private/AddOrder`)
+- Cancels orders via Kraken REST API (`/0/private/CancelOrder`, `/0/private/CancelAll`)
+- Polls for fills via QueryOrders every 1 second
+- Falls back to paper mode automatically if API connection fails
+- Live mode enforces strict affordability: buys require sufficient USD, sells require BTC position
+- Exponential backoff on API errors prevents rate limit violations
+- REST pair name `XBTUSD` (different from WebSocket `BTC/USD`)
 
 ### Configuration (in main.py)
 - `symbol` — Trading pair (default: BTC/USD)
 - `ws_url` — WebSocket endpoint (default: Kraken v2)
 - `ws_symbol` — Exchange-specific symbol for subscription
+- `rest_pair` — REST API pair name (default: XBTUSD)
+- `live_mode` — Enable live trading on Kraken (default: True)
 - `order_qty` — Order size per side (default: 0.001)
 - `max_spread_bps` — Maximum acceptable spread in basis points
 - `stale_order_ms` — Cancel orders older than this (default: 500ms)
 - `max_position` — Maximum net position allowed
-- `starting_capital` — Paper trading capital (default: $16)
+- `starting_capital` — Paper trading capital / overridden by live balance
 - `fill_cooldown_ms` — Minimum time between fills (default: 200ms)
 - `skew_factor` — How aggressively to skew prices for inventory (default: 0.5)
 - `ema_window` — EMA period for momentum detection (default: 50)
@@ -50,7 +69,7 @@ WildBot is a high-frequency trading (HFT) scalping bot that connects to cryptocu
 
 ### Web Server
 - Flask serves HTML dashboard on `/` with live-updating stats
-- JSON API on `/api/status` for programmatic access (includes trade_history, microprice, ema, momentum)
+- JSON API on `/api/status` for programmatic access (includes live_mode, trade_history, microprice, ema, momentum)
 - Health check on `/health`
 - Cache-Control: no-cache headers on all responses
 - Production deployment uses gunicorn
@@ -66,7 +85,7 @@ WildBot is a high-frequency trading (HFT) scalping bot that connects to cryptocu
 - `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` stored as Replit Secrets
 - Rate-limited notifications (60s minimum between updates)
 - Alert messages have 5s rate limit
-- Critical alerts: drawdown stops, disconnections (sent once, not repeated)
+- Critical alerts: drawdown stops, disconnections, live mode activation/failure
 - Daily summary message sent once per UTC day
 
 ## Tech Stack
@@ -74,26 +93,28 @@ WildBot is a high-frequency trading (HFT) scalping bot that connects to cryptocu
 - websockets (async WebSocket client)
 - asyncio (concurrency)
 - Flask + gunicorn (web server / deployment)
-- requests (Telegram API)
+- requests (Kraken REST API + Telegram API)
+
+## Environment Secrets
+- `KRAKEN_API_KEY` — Kraken API public key (required for live mode)
+- `KRAKEN_API_SECRET` — Kraken API private key (required for live mode)
+- `TELEGRAM_BOT_TOKEN` — Telegram bot token for notifications
+- `TELEGRAM_CHAT_ID` — Telegram chat ID for notifications
+- `SESSION_SECRET` — Flask session secret
 
 ## Recent Changes
+- 2026-02-12: Implemented live trading via Kraken REST API (AddOrder, CancelOrder, CancelAll, QueryOrders)
+- 2026-02-12: Created kraken_client.py with HMAC-SHA512 authentication and rate limiting
+- 2026-02-12: Added live_mode toggle with automatic fallback to paper on API failure
+- 2026-02-12: Live balance initialization from Kraken (USD + BTC)
+- 2026-02-12: Added exponential backoff on API errors (2s → 60s)
+- 2026-02-12: Live-aware affordability checks (buys need USD, sells need BTC position)
+- 2026-02-12: Dashboard shows LIVE/PAPER mode badge
+- 2026-02-12: Telegram alerts for live mode activation/failure
 - 2026-02-12: Fixed position-crossing logic for correct round-trip PnL on long↔short flips
 - 2026-02-12: Fixed equity calculation bug (use position_value, not unrealized profit)
 - 2026-02-12: Fixed drawdown alert spam (one-shot flag + 5s rate limit on send_alert)
-- 2026-02-12: Added Microprice strategy (volume-weighted fair price from order book)
-- 2026-02-12: Added Inventory Skew pricing (bias prices to reduce position risk)
-- 2026-02-12: Added Momentum Filter (EMA-based, skip orders against trend)
-- 2026-02-12: Added fill cooldown (200ms) and single-fill-per-tick to prevent cascades
-- 2026-02-12: Added average cost tracking with weighted average entry price
-- 2026-02-12: Replaced per-fill win/loss with round-trip PnL tracking
-- 2026-02-12: Added trade history (last 50 trades, 20 shown on dashboard)
-- 2026-02-12: Added daily summary Telegram message
-- 2026-02-12: Enhanced dashboard with Strategy Indicators section, trade history table
-- 2026-02-12: Built professional HTML live dashboard with dark theme and auto-refresh
-- 2026-02-12: Added session statistics (win/loss, win rate, peak equity, max drawdown)
-- 2026-02-12: Enhanced risk management with affordability checks, mark-to-market equity, 50% drawdown stop
-- 2026-02-12: Integrated Telegram notifications with rate limiting
-- 2026-02-12: Added $16 starting capital tracking with balance, realized PnL, and return %
-- 2026-02-12: Switched L1 data source from Binance to Kraken WebSocket v2 API (no IP restrictions)
-- 2026-02-12: Added Flask web server and gunicorn deployment config
-- 2026-02-12: Initial creation of HFT scalper module with WebSocket L1 monitoring, market making, and risk management
+- 2026-02-12: Added Microprice, Inventory Skew, Momentum Filter strategies
+- 2026-02-12: Added fill cooldown (200ms), average cost tracking, round-trip PnL tracking
+- 2026-02-12: Built professional HTML live dashboard with dark theme
+- 2026-02-12: Initial creation of HFT scalper module

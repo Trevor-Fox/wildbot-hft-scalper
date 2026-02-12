@@ -31,6 +31,16 @@
   }
   .status-dot.running { background: #9ece6a; box-shadow: 0 0 8px #9ece6a88; }
   .status-label { font-size: 0.85rem; color: #565f89; }
+  .mode-badge {
+    display: inline-block;
+    padding: 3px 12px;
+    border-radius: 4px;
+    font-size: 0.75rem;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+  }
+  .mode-live { background: #f7768e22; color: #f7768e; border: 1px solid #f7768e55; }
+  .mode-paper { background: #565f8922; color: #565f89; border: 1px solid #565f8955; }
   .grid { display: grid; gap: 12px; margin-bottom: 20px; }
   .grid-4 { grid-template-columns: repeat(4, 1fr); }
   .grid-5 { grid-template-columns: repeat(5, 1fr); }
@@ -147,6 +157,7 @@
   <div class="status-dot" id="statusDot"></div>
   <h1>WildBot HFT Scalper</h1>
   <span class="status-label" id="statusLabel">connecting...</span>
+  <span class="mode-badge" id="modeBadge">—</span>
 </header>
 
 <div class="grid grid-4">
@@ -308,12 +319,20 @@ function update() {
     .then(function(d) {
       var dot = document.getElementById('statusDot');
       var lbl = document.getElementById('statusLabel');
+      var modeBadge = document.getElementById('modeBadge');
       if (d.status === 'running') {
         dot.className = 'status-dot running';
         lbl.textContent = 'running';
       } else {
         dot.className = 'status-dot';
         lbl.textContent = 'stopped';
+      }
+      if (d.live_mode) {
+        modeBadge.textContent = 'LIVE';
+        modeBadge.className = 'mode-badge mode-live';
+      } else {
+        modeBadge.textContent = 'PAPER';
+        modeBadge.className = 'mode-badge mode-paper';
       }
 
       document.getElementById('balance').textContent = '$' + d.balance.toFixed(2);

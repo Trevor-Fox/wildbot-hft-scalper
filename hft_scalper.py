@@ -145,6 +145,7 @@ class ScalperConfig:
     symbol: str = "BTC/USD"
     ws_url: str = "wss://ws.kraken.com/v2"
     ws_symbol: str = "BTC/USD"
+    rest_pair: str = "XBTUSD"
     starting_capital: float = 16.0
     order_qty: float = 0.001
     max_spread_bps: float = 10.0
@@ -159,6 +160,7 @@ class ScalperConfig:
     skew_factor: float = 0.5
     ema_window: int = 50
     momentum_filter_enabled: bool = True
+    live_mode: bool = False
 
 
 class RiskManager:
@@ -198,11 +200,17 @@ class RiskManager:
     def can_place_buy(self, price: float) -> bool:
         position_ok = self.position + self.config.order_qty <= self.config.max_position
         cost = price * self.config.order_qty
-        affordable = cost <= (self.balance + self.starting_capital * 5)
+        if self.config.live_mode:
+            affordable = cost <= self.balance
+        else:
+            affordable = cost <= (self.balance + self.starting_capital * 5)
         return position_ok and affordable
 
     def can_place_sell(self) -> bool:
-        return self.position - self.config.order_qty >= -self.config.max_position
+        position_ok = self.position - self.config.order_qty >= -self.config.max_position
+        if self.config.live_mode and self.position <= 0:
+            return False
+        return position_ok
 
     def is_spread_acceptable(self, tob: TopOfBook) -> bool:
         if tob.mid_price <= 0:
@@ -325,11 +333,18 @@ class RiskManager:
 
 
 class OrderManager:
-    def __init__(self, config: ScalperConfig):
+    def __init__(self, config: ScalperConfig, kraken_client=None):
         self._open_orders: dict[str, Order] = {}
         self._seq: int = 0
         self._last_fill_time: float = 0.0
         self._fill_cooldown_ms: float = config.fill_cooldown_ms
+        self._live_mode: bool = config.live_mode
+        self._kraken = kraken_client
+        self._rest_pair: str = config.rest_pair
+        self._txid_map: dict[str, str] = {}
+        self._consecutive_errors: int = 0
+        self._last_error_time: float = 0.0
+        self._error_backoff: float = 2.0
 
     @property
     def open_orders(self) -> dict[str, Order]:
@@ -339,7 +354,12 @@ class OrderManager:
     def open_count(self) -> int:
         return len(self._open_orders)
 
-    def create_order(self, side: OrderSide, price: float, qty: float) -> Order:
+    def create_order(self, side: OrderSide, price: float, qty: float) -> Optional[Order]:
+        if self._live_mode and self._kraken:
+            return self._create_live_order(side, price, qty)
+        return self._create_paper_order(side, price, qty)
+
+    def _create_paper_order(self, side: OrderSide, price: float, qty: float) -> Order:
         self._seq += 1
         oid = f"WB-{self._seq:06d}"
         order = Order(
@@ -354,21 +374,106 @@ class OrderManager:
         logger.info(f"Placed {side.value} order {oid}: {qty}@{price:.2f}")
         return order
 
+    def _create_live_order(self, side: OrderSide, price: float, qty: float) -> Optional[Order]:
+        now = time.monotonic()
+        if now - self._last_error_time < self._error_backoff:
+            return None
+        try:
+            txid = self._kraken.add_order(
+                pair=self._rest_pair,
+                side=side.value,
+                order_type="limit",
+                volume=f"{qty:.8f}",
+                price=f"{price:.1f}",
+            )
+            self._consecutive_errors = 0
+            self._error_backoff = 2.0
+            order = Order(
+                order_id=txid,
+                side=side,
+                price=price,
+                quantity=qty,
+                status=OrderStatus.OPEN,
+                placed_at=time.monotonic(),
+            )
+            self._open_orders[txid] = order
+            logger.info(f"LIVE placed {side.value} order {txid}: {qty}@{price:.2f}")
+            return order
+        except Exception as exc:
+            self._consecutive_errors += 1
+            self._last_error_time = now
+            self._error_backoff = min(60.0, 2.0 * (2 ** self._consecutive_errors))
+            logger.warning(f"LIVE order failed ({self._consecutive_errors}x, backoff={self._error_backoff:.0f}s): {exc}")
+            return None
+
     def cancel_order(self, order_id: str) -> Optional[Order]:
         order = self._open_orders.pop(order_id, None)
         if order:
             order.status = OrderStatus.CANCELLED
-            logger.info(f"Cancelled order {order_id}")
+            if self._live_mode and self._kraken:
+                try:
+                    self._kraken.cancel_order(order_id)
+                    logger.info(f"LIVE cancelled order {order_id}")
+                except Exception as exc:
+                    logger.warning(f"LIVE cancel failed for {order_id}: {exc}")
+            else:
+                logger.info(f"Cancelled order {order_id}")
         return order
 
     def cancel_all(self) -> int:
         count = len(self._open_orders)
+        if self._live_mode and self._kraken and count > 0:
+            try:
+                cancelled = self._kraken.cancel_all()
+                logger.info(f"LIVE cancelled {cancelled} orders on exchange")
+            except Exception as exc:
+                logger.warning(f"LIVE cancel_all failed: {exc}")
+                for oid in list(self._open_orders):
+                    try:
+                        self._kraken.cancel_order(oid)
+                    except Exception:
+                        pass
         for oid in list(self._open_orders):
             self._open_orders[oid].status = OrderStatus.CANCELLED
         self._open_orders.clear()
         if count:
             logger.info(f"Cancelled all {count} open orders")
         return count
+
+    def check_fills_live(self) -> list[Order]:
+        if not self._live_mode or not self._kraken or not self._open_orders:
+            return []
+        now_ms = time.monotonic() * 1000
+        if now_ms - self._last_fill_time < self._fill_cooldown_ms:
+            return []
+        try:
+            txids = list(self._open_orders.keys())
+            results = self._kraken.query_orders(txids)
+            filled = []
+            for txid, info in results.items():
+                status = info.get("status", "")
+                if status == "closed":
+                    order = self._open_orders.pop(txid, None)
+                    if order:
+                        vol_exec = float(info.get("vol_exec", order.quantity))
+                        avg_price = float(info.get("price", order.price))
+                        if avg_price <= 0:
+                            avg_price = order.price
+                        order.status = OrderStatus.FILLED
+                        order.quantity = vol_exec
+                        order.price = avg_price
+                        filled.append(order)
+                        self._last_fill_time = now_ms
+                        logger.info(f"LIVE fill detected: {order.side.value} {vol_exec}@{avg_price:.2f} txid={txid}")
+                elif status == "canceled" or status == "expired":
+                    order = self._open_orders.pop(txid, None)
+                    if order:
+                        order.status = OrderStatus.CANCELLED
+                        logger.info(f"LIVE order {status}: {txid}")
+            return filled
+        except Exception as exc:
+            logger.warning(f"LIVE fill check failed: {exc}")
+            return []
 
     def simulate_fill_check(self, tob: TopOfBook) -> list[Order]:
         now_ms = time.monotonic() * 1000
@@ -394,11 +499,12 @@ class OrderManager:
 
 
 class HFTScalper:
-    def __init__(self, config: Optional[ScalperConfig] = None):
+    def __init__(self, config: Optional[ScalperConfig] = None, kraken_client=None):
         self.config = config or ScalperConfig()
         self.tob = TopOfBook()
         self.risk = RiskManager(self.config)
-        self.orders = OrderManager(self.config)
+        self._kraken = kraken_client
+        self.orders = OrderManager(self.config, kraken_client=kraken_client)
         self.telegram = TelegramNotifier()
         self._running = False
         self._update_count = 0
@@ -406,6 +512,8 @@ class HFTScalper:
         self._ema_alpha: float = 2.0 / (self.config.ema_window + 1)
         self._trade_history: list[dict] = []
         self._drawdown_alerted: bool = False
+        self._live_fill_poll_interval: float = 1.0
+        self._last_live_fill_poll: float = 0.0
 
     @property
     def momentum_signal(self) -> str:
@@ -460,7 +568,15 @@ class HFTScalper:
         self._update_count += 1
         self._update_ema()
 
-        filled = self.orders.simulate_fill_check(self.tob)
+        if self.config.live_mode:
+            now = time.monotonic()
+            if now - self._last_live_fill_poll >= self._live_fill_poll_interval:
+                self._last_live_fill_poll = now
+                filled = self.orders.check_fills_live()
+            else:
+                filled = []
+        else:
+            filled = self.orders.simulate_fill_check(self.tob)
         for order in filled:
             self.risk.record_fill(order.side, order.price, order.quantity)
             self._trade_history.append({
@@ -650,10 +766,58 @@ class HFTScalper:
                 self.orders.cancel_order(oid)
             await asyncio.sleep(0.1)
 
+    def _initialize_live_balance(self):
+        if not self.config.live_mode or not self._kraken:
+            return
+        try:
+            if not self._kraken.validate_connection():
+                logger.error("LIVE MODE: Kraken API connection failed — falling back to paper mode")
+                self.config.live_mode = False
+                self.orders._live_mode = False
+                self.telegram.send_alert(
+                    "🚨 <b>WildBot LIVE MODE FAILED</b>\n"
+                    "Could not connect to Kraken API.\n"
+                    "Falling back to paper trading mode."
+                )
+                return
+
+            balances = self._kraken.get_balance()
+            usd_bal = balances.get("ZUSD", 0.0)
+            btc_bal = balances.get("XXBT", 0.0)
+
+            self.risk.starting_capital = usd_bal
+            self.risk.balance = usd_bal
+            self.risk.peak_equity = usd_bal
+            self.risk.position = btc_bal
+            self.risk.avg_entry_price = 0.0
+
+            logger.info(
+                f"LIVE MODE initialized | USD=${usd_bal:,.2f} BTC={btc_bal:.8f}"
+            )
+            self.telegram.send_alert(
+                f"🟢 <b>WildBot LIVE MODE ACTIVE</b>\n"
+                f"Exchange: Kraken\n"
+                f"Pair: {self.config.symbol}\n"
+                f"USD Balance: ${usd_bal:,.2f}\n"
+                f"BTC Balance: {btc_bal:.8f}\n"
+                f"Order Size: {self.config.order_qty} BTC\n"
+                f"Max Position: {self.config.max_position} BTC"
+            )
+        except Exception as exc:
+            logger.error(f"LIVE MODE initialization failed: {exc} — falling back to paper mode")
+            self.config.live_mode = False
+            self.orders._live_mode = False
+            self.telegram.send_alert(
+                f"🚨 <b>WildBot LIVE MODE FAILED</b>\n"
+                f"Error: {exc}\n"
+                f"Falling back to paper trading mode."
+            )
+
     async def run(self):
         self._running = True
+        mode_str = "LIVE" if self.config.live_mode else "PAPER"
         logger.info(
-            f"WildBot HFT Scalper starting | symbol={self.config.symbol} "
+            f"WildBot HFT Scalper starting [{mode_str}] | symbol={self.config.symbol} "
             f"capital=${self.config.starting_capital:.2f} "
             f"qty={self.config.order_qty} stale_ms={self.config.stale_order_ms} "
             f"fill_cooldown_ms={self.config.fill_cooldown_ms} "
@@ -661,6 +825,9 @@ class HFTScalper:
             f"ema_window={self.config.ema_window} "
             f"momentum_filter={self.config.momentum_filter_enabled}"
         )
+
+        self._initialize_live_balance()
+
         try:
             await asyncio.gather(
                 self._ws_loop(),
