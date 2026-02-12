@@ -64,6 +64,7 @@ class ScalperConfig:
     symbol: str = "BTC/USD"
     ws_url: str = "wss://ws.kraken.com/v2"
     ws_symbol: str = "BTC/USD"
+    starting_capital: float = 16.0
     order_qty: float = 0.001
     max_spread_bps: float = 10.0
     stale_order_ms: float = 500.0
@@ -77,9 +78,21 @@ class ScalperConfig:
 class RiskManager:
     def __init__(self, config: ScalperConfig):
         self.config = config
+        self.starting_capital: float = config.starting_capital
+        self.balance: float = config.starting_capital
         self.position: float = 0.0
         self.pnl: float = 0.0
         self.trade_count: int = 0
+
+    @property
+    def equity(self) -> float:
+        return self.balance
+
+    @property
+    def return_pct(self) -> float:
+        if self.starting_capital > 0:
+            return ((self.balance - self.starting_capital) / self.starting_capital) * 100
+        return 0.0
 
     def can_place_buy(self) -> bool:
         return self.position + self.config.order_qty <= self.config.max_position
@@ -94,16 +107,20 @@ class RiskManager:
         return spread_bps <= self.config.max_spread_bps
 
     def record_fill(self, side: OrderSide, price: float, qty: float):
+        cost = price * qty
         if side == OrderSide.BUY:
             self.position += qty
-            self.pnl -= price * qty
+            self.balance -= cost
+            self.pnl -= cost
         else:
             self.position -= qty
-            self.pnl += price * qty
+            self.balance += cost
+            self.pnl += cost
         self.trade_count += 1
         logger.info(
             f"Fill: {side.value} {qty}@{price:.2f} | "
-            f"pos={self.position:.6f} pnl={self.pnl:.4f} trades={self.trade_count}"
+            f"bal=${self.balance:.2f} pos={self.position:.6f} "
+            f"pnl={self.pnl:.4f} trades={self.trade_count}"
         )
 
     def check_stale_orders(self, open_orders: dict[str, Order]) -> list[str]:
@@ -256,7 +273,8 @@ class HFTScalper:
             logger.info(
                 f"TOB bid={self.tob.best_bid:.2f} ask={self.tob.best_ask:.2f} "
                 f"spread={spread_bps:.2f}bps | "
-                f"pos={self.risk.position:.6f} pnl={self.risk.pnl:.4f} "
+                f"bal=${self.risk.balance:.2f} pos={self.risk.position:.6f} "
+                f"pnl={self.risk.pnl:.4f} return={self.risk.return_pct:.2f}% "
                 f"orders={self.orders.open_count}"
             )
 
@@ -309,6 +327,7 @@ class HFTScalper:
         self._running = True
         logger.info(
             f"WildBot HFT Scalper starting | symbol={self.config.symbol} "
+            f"capital=${self.config.starting_capital:.2f} "
             f"qty={self.config.order_qty} stale_ms={self.config.stale_order_ms}"
         )
         try:
@@ -325,6 +344,7 @@ class HFTScalper:
         self._running = False
         self.orders.cancel_all()
         logger.info(
-            f"Scalper stopped | trades={self.risk.trade_count} "
-            f"pnl={self.risk.pnl:.4f} final_pos={self.risk.position:.6f}"
+            f"Scalper stopped | bal=${self.risk.balance:.2f} trades={self.risk.trade_count} "
+            f"pnl={self.risk.pnl:.4f} return={self.risk.return_pct:.2f}% "
+            f"final_pos={self.risk.position:.6f}"
         )

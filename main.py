@@ -13,6 +13,7 @@ config = ScalperConfig(
     symbol="BTC/USD",
     ws_url="wss://ws.kraken.com/v2",
     ws_symbol="BTC/USD",
+    starting_capital=16.0,
     order_qty=0.001,
     max_spread_bps=10.0,
     stale_order_ms=500.0,
@@ -37,6 +38,9 @@ def index():
     return jsonify({
         "status": "running" if scalper._running else "stopped",
         "symbol": scalper.config.symbol,
+        "starting_capital": scalper.risk.starting_capital,
+        "balance": round(scalper.risk.balance, 2),
+        "return_pct": round(scalper.risk.return_pct, 2),
         "position": scalper.risk.position,
         "pnl": round(scalper.risk.pnl, 4),
         "trade_count": scalper.risk.trade_count,
