@@ -1,6 +1,7 @@
 import asyncio
 import os
 import signal
+import socket
 import subprocess
 import threading
 import time
@@ -10,11 +11,21 @@ from hft_scalper import HFTScalper, ScalperConfig
 from kraken_client import KrakenClient
 
 port = int(os.environ.get("PORT", 5000))
-try:
-    subprocess.run(["fuser", "-k", f"{port}/tcp"], capture_output=True, timeout=5)
-    time.sleep(1)
-except Exception:
-    pass
+for attempt in range(3):
+    try:
+        subprocess.run(["fuser", "-k", f"{port}/tcp"], capture_output=True, timeout=5)
+        time.sleep(2)
+    except Exception:
+        pass
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        s.bind(("0.0.0.0", port))
+        s.close()
+        break
+    except OSError:
+        s.close()
+        time.sleep(3)
+    
 
 app = Flask(__name__)
 
