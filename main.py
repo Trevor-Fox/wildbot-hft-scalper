@@ -26,12 +26,12 @@ config = ScalperConfig(
     starting_capital=16.0,
     order_qty=0.0001,
     max_spread_bps=50.0,
-    stale_order_ms=5000.0,
+    stale_order_ms=30000.0,
     max_position=0.01,
     max_open_orders=2,
     live_mode=True,
     maker_fee_bps=16.0,
-    min_profit_bps=2.0,
+    min_profit_bps=1.0,
 )
 
 kraken = KrakenClient()

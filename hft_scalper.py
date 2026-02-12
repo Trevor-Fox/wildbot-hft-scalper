@@ -169,6 +169,7 @@ class ScalperConfig:
     live_mode: bool = False
     maker_fee_bps: float = 16.0
     min_profit_bps: float = 2.0
+    requote_threshold_bps: float = 5.0
 
 
 class RiskManager:
@@ -693,10 +694,6 @@ class HFTScalper:
                 )
             return
 
-        stale = self.risk.check_stale_orders(self.orders.open_orders)
-        for oid in stale:
-            self.orders.cancel_order(oid)
-
         if not self.risk.is_spread_acceptable(self.tob):
             if self.orders.open_count > 0:
                 self.orders.cancel_all()
@@ -705,6 +702,15 @@ class HFTScalper:
 
         buy_price, sell_price = self.risk.calculate_skewed_prices(self.tob)
         momentum = self.momentum_signal
+
+        requote_thresh = self.tob.mid_price * self.config.requote_threshold_bps / 10_000
+        for oid, order in list(self.orders.open_orders.items()):
+            if order.status != OrderStatus.OPEN:
+                continue
+            drift = abs(order.price - (buy_price if order.side == OrderSide.BUY else sell_price))
+            age_ms = (time.monotonic() - order.placed_at) * 1000
+            if drift > requote_thresh and age_ms > self.config.stale_order_ms:
+                self.orders.cancel_order(oid)
 
         place_buy = True
         place_sell = True
@@ -852,10 +858,7 @@ class HFTScalper:
 
     async def _stale_order_monitor(self):
         while self._running:
-            stale = self.risk.check_stale_orders(self.orders.open_orders)
-            for oid in stale:
-                self.orders.cancel_order(oid)
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(1.0)
 
     def _refresh_live_balance(self):
         if not self._kraken:
@@ -880,8 +883,17 @@ class HFTScalper:
         if not self.config.live_mode or not self._kraken:
             return
         try:
-            if not self._kraken.validate_connection():
-                logger.error("LIVE MODE: Kraken API connection failed — falling back to paper mode")
+            connected = False
+            for attempt in range(5):
+                if attempt > 0:
+                    wait = 5 * (2 ** attempt)
+                    logger.warning(f"Kraken API validation attempt {attempt}/5 failed, retrying in {wait}s...")
+                    time.sleep(wait)
+                if self._kraken.validate_connection():
+                    connected = True
+                    break
+            if not connected:
+                logger.error("LIVE MODE: Kraken API connection failed after 5 attempts — falling back to paper mode")
                 self.config.live_mode = False
                 self.orders._live_mode = False
                 self.telegram.send_alert(
