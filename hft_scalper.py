@@ -59,21 +59,27 @@ class TelegramNotifier:
         today_str = now_utc.strftime("%Y-%m-%d")
         if today_str != self._last_daily_summary_date and now_utc.hour >= self._daily_summary_hour:
             self._last_daily_summary_date = today_str
+            mode = stats.get("mode", "PAPER")
+            equity = stats.get("equity", 0)
+            rpnl = stats.get("pnl", 0)
+            upnl = stats.get("unrealized_pnl", 0)
+            total_pnl = rpnl + upnl
+            pnl_emoji = "📈" if total_pnl >= 0 else "📉"
             msg = (
-                f"📊 <b>WildBot Daily Summary</b>\n"
-                f"Date: {today_str}\n\n"
-                f"Equity: ${stats.get('equity', 0):,.2f}\n"
-                f"Balance: ${stats.get('balance', 0):,.2f}\n"
-                f"Realized PnL: ${stats.get('pnl', 0):,.4f}\n"
+                f"📊 <b>WildBot Daily Summary</b> | {mode}\n"
+                f"Date: {today_str}\n"
+                f"{'─' * 20}\n"
+                f"{pnl_emoji} <b>Total PnL: ${total_pnl:,.4f}</b>\n"
+                f"Equity: ${equity:,.2f}\n"
+                f"USDC: ${stats.get('balance', 0):,.2f} | BTC: {stats.get('position', 0):.6f}\n"
+                f"{'─' * 20}\n"
+                f"Realized: ${rpnl:,.4f}\n"
+                f"Unrealized: ${upnl:,.4f}\n"
                 f"Return: {stats.get('return_pct', 0):.2f}%\n"
-                f"Position: {stats.get('position', 0):.6f}\n"
-                f"Trades: {stats.get('trade_count', 0)}\n"
-                f"Win Rate: {stats.get('win_rate', 0):.1f}%\n"
-                f"Wins: {stats.get('wins', 0)} | Losses: {stats.get('losses', 0)}\n"
-                f"Max Drawdown: {stats.get('max_drawdown', 0):.2f}%\n"
-                f"EMA: ${stats.get('ema', 0):,.2f}\n"
-                f"Momentum: {stats.get('momentum', 'neutral')}\n"
-                f"Ticks: {stats.get('ticks', 0)}"
+                f"Trades: {stats.get('trade_count', 0)} | W/L: {stats.get('wins', 0)}/{stats.get('losses', 0)} ({stats.get('win_rate', 0):.0f}%)\n"
+                f"Max DD: {stats.get('max_drawdown', 0):.2f}%\n"
+                f"{'─' * 20}\n"
+                f"Ticks processed: {stats.get('ticks', 0)}"
             )
             threading.Thread(target=self._send_sync, args=(msg,), daemon=True).start()
 
@@ -636,6 +642,7 @@ class HFTScalper:
             filled = self.orders.simulate_fill_check(self.tob)
         for order in filled:
             self.risk.record_fill(order.side, order.price, order.quantity)
+            mid = self.tob.mid_price
             self._trade_history.append({
                 "time": time.time(),
                 "side": order.side.value,
@@ -646,6 +653,17 @@ class HFTScalper:
             })
             if len(self._trade_history) > 50:
                 self._trade_history = self._trade_history[-50:]
+            mode_tag = "LIVE" if self.config.live_mode else "PAPER"
+            side_emoji = "🟢" if order.side == OrderSide.BUY else "🔴"
+            self.telegram.send_alert(
+                f"{side_emoji} <b>{mode_tag} Fill</b> | {self.config.symbol}\n"
+                f"{order.side.value.upper()} {order.quantity} @ ${order.price:,.2f}\n\n"
+                f"Position: {self.risk.position:.6f} BTC\n"
+                f"Avg Entry: ${self.risk.avg_entry_price:,.2f}\n"
+                f"Equity: ${self.risk.equity(mid):,.2f}\n"
+                f"Realized PnL: ${self.risk.pnl:,.4f}\n"
+                f"W/L: {self.risk.wins}/{self.risk.losses}"
+            )
 
         self.risk.update_drawdown(self.tob.mid_price)
 
@@ -726,26 +744,27 @@ class HFTScalper:
                 f"ema={self._ema:.2f} momentum={momentum} "
                 f"avg_entry={self.risk.avg_entry_price:.2f}"
             )
+            mode_tag = "🔴 LIVE" if self.config.live_mode else "📝 PAPER"
+            equity = self.risk.equity(mid)
+            upnl = self.risk.unrealized_pnl(mid)
+            rpnl = self.risk.pnl
+            total_pnl = upnl + rpnl
+            pnl_emoji = "📈" if total_pnl >= 0 else "📉"
             self.telegram.send(
-                f"<b>WildBot Scalper</b>\n"
-                f"{self.config.symbol} | Tick #{self._update_count}\n\n"
-                f"Bid: ${self.tob.best_bid:,.2f}\n"
-                f"Ask: ${self.tob.best_ask:,.2f}\n"
-                f"Spread: {spread_bps:.2f} bps\n"
-                f"Microprice: ${self.tob.microprice:,.2f}\n\n"
-                f"Equity: ${self.risk.equity(mid):,.2f}\n"
-                f"Balance: ${self.risk.balance:,.2f}\n"
-                f"Unrealized PnL: ${self.risk.unrealized_pnl(mid):,.4f}\n"
-                f"Realized PnL: ${self.risk.pnl:,.4f}\n"
+                f"<b>WildBot {mode_tag}</b>\n"
+                f"{self.config.symbol} | ${mid:,.2f}\n"
+                f"{'─' * 20}\n"
+                f"{pnl_emoji} <b>Total PnL: ${total_pnl:,.4f}</b>\n"
+                f"Equity: ${equity:,.2f}\n"
+                f"USDC: ${self.risk.balance:,.2f} | BTC: {self.risk.position:.6f}\n"
+                f"{'─' * 20}\n"
+                f"Realized: ${rpnl:,.4f}\n"
+                f"Unrealized: ${upnl:,.4f}\n"
                 f"Return: {self.risk.return_pct(mid):.2f}%\n"
-                f"Position: {self.risk.position:.6f}\n"
-                f"Avg Entry: ${self.risk.avg_entry_price:,.2f}\n"
-                f"Win Rate: {self.risk.win_rate:.1f}%\n"
-                f"Max Drawdown: {self.risk.max_drawdown_pct_seen:.2f}%\n"
-                f"Trades: {self.risk.trade_count}\n"
-                f"Open Orders: {self.orders.open_count}\n"
-                f"EMA: ${self._ema:,.2f}\n"
-                f"Momentum: {momentum}"
+                f"Trades: {self.risk.trade_count} | W/L: {self.risk.wins}/{self.risk.losses} ({self.risk.win_rate:.0f}%)\n"
+                f"Max DD: {self.risk.max_drawdown_pct_seen:.2f}%\n"
+                f"{'─' * 20}\n"
+                f"Spread: {spread_bps:.2f} bps | Momentum: {momentum}"
             )
 
         if self._update_count % 500 == 0:
@@ -753,6 +772,7 @@ class HFTScalper:
                 "equity": self.risk.equity(self.tob.mid_price),
                 "balance": self.risk.balance,
                 "pnl": self.risk.pnl,
+                "unrealized_pnl": self.risk.unrealized_pnl(self.tob.mid_price),
                 "return_pct": self.risk.return_pct(self.tob.mid_price),
                 "position": self.risk.position,
                 "trade_count": self.risk.trade_count,
@@ -763,6 +783,7 @@ class HFTScalper:
                 "ema": self._ema,
                 "momentum": self.momentum_signal,
                 "ticks": self._update_count,
+                "mode": "LIVE" if self.config.live_mode else "PAPER",
             }
             self.telegram.check_daily_summary(stats)
 
