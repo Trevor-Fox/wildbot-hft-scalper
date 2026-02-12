@@ -20,16 +20,27 @@ logger = logging.getLogger("HFTScalper")
 
 
 class TelegramNotifier:
-    def __init__(self):
+    def __init__(self, min_interval: float = 60.0):
         self.token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
         self.chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
         self.enabled = bool(self.token and self.chat_id)
+        self.min_interval = min_interval
+        self._last_send_time: float = 0
         if self.enabled:
             logger.info("Telegram notifications enabled")
         else:
             logger.warning("Telegram notifications disabled — missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID")
 
     def send(self, message: str):
+        if not self.enabled:
+            return
+        now = time.time()
+        if now - self._last_send_time < self.min_interval:
+            return
+        self._last_send_time = now
+        threading.Thread(target=self._send_sync, args=(message,), daemon=True).start()
+
+    def send_alert(self, message: str):
         if not self.enabled:
             return
         threading.Thread(target=self._send_sync, args=(message,), daemon=True).start()
@@ -105,6 +116,7 @@ class ScalperConfig:
     tick_size: float = 0.01
     reconnect_delay: float = 1.0
     max_reconnect_delay: float = 30.0
+    max_drawdown_pct: float = 50.0
 
 
 class RiskManager:
@@ -115,19 +127,31 @@ class RiskManager:
         self.position: float = 0.0
         self.pnl: float = 0.0
         self.trade_count: int = 0
+        self.wins: int = 0
+        self.losses: int = 0
+        self.total_profit: float = 0.0
+        self.total_loss: float = 0.0
+        self.peak_equity: float = config.starting_capital
+        self.max_drawdown_pct_seen: float = 0.0
+        self.is_stopped: bool = False
+        self._prev_pnl: float = 0.0
 
-    @property
-    def equity(self) -> float:
-        return self.balance
+    def unrealized_pnl(self, mid_price: float) -> float:
+        return self.position * mid_price
 
-    @property
-    def return_pct(self) -> float:
+    def equity(self, mid_price: float) -> float:
+        return self.balance + self.unrealized_pnl(mid_price)
+
+    def return_pct(self, mid_price: float) -> float:
         if self.starting_capital > 0:
-            return ((self.balance - self.starting_capital) / self.starting_capital) * 100
+            return ((self.equity(mid_price) - self.starting_capital) / self.starting_capital) * 100
         return 0.0
 
-    def can_place_buy(self) -> bool:
-        return self.position + self.config.order_qty <= self.config.max_position
+    def can_place_buy(self, price: float) -> bool:
+        position_ok = self.position + self.config.order_qty <= self.config.max_position
+        cost = price * self.config.order_qty
+        affordable = cost <= (self.balance + self.starting_capital * 5)
+        return position_ok and affordable
 
     def can_place_sell(self) -> bool:
         return self.position - self.config.order_qty >= -self.config.max_position
@@ -149,11 +173,47 @@ class RiskManager:
             self.balance += cost
             self.pnl += cost
         self.trade_count += 1
+
+        pnl_change = self.pnl - self._prev_pnl
+        if pnl_change > 0:
+            self.wins += 1
+            self.total_profit += pnl_change
+        elif pnl_change < 0:
+            self.losses += 1
+            self.total_loss += abs(pnl_change)
+        self._prev_pnl = self.pnl
+
         logger.info(
             f"Fill: {side.value} {qty}@{price:.2f} | "
             f"bal=${self.balance:.2f} pos={self.position:.6f} "
             f"pnl={self.pnl:.4f} trades={self.trade_count}"
         )
+
+    def update_drawdown(self, mid_price: float):
+        eq = self.equity(mid_price)
+        self.peak_equity = max(self.peak_equity, eq)
+        if self.peak_equity > 0:
+            drawdown_pct = ((self.peak_equity - eq) / self.peak_equity) * 100
+            self.max_drawdown_pct_seen = max(self.max_drawdown_pct_seen, drawdown_pct)
+            if drawdown_pct > self.config.max_drawdown_pct:
+                self.is_stopped = True
+                logger.warning(
+                    f"DRAWDOWN STOP: {drawdown_pct:.2f}% drawdown exceeds "
+                    f"max {self.config.max_drawdown_pct:.2f}% — stopping trading"
+                )
+
+    @property
+    def win_rate(self) -> float:
+        total = self.wins + self.losses
+        if total > 0:
+            return (self.wins / total) * 100
+        return 0.0
+
+    @property
+    def avg_trade_pnl(self) -> float:
+        if self.trade_count > 0:
+            return self.pnl / self.trade_count
+        return 0.0
 
     def check_stale_orders(self, open_orders: dict[str, Order]) -> list[str]:
         now = time.monotonic() * 1000
@@ -269,6 +329,20 @@ class HFTScalper:
         for order in filled:
             self.risk.record_fill(order.side, order.price, order.quantity)
 
+        self.risk.update_drawdown(self.tob.mid_price)
+
+        if self.risk.is_stopped:
+            self.orders.cancel_all()
+            self.telegram.send_alert(
+                f"🚨 <b>WildBot DRAWDOWN STOP</b>\n"
+                f"{self.config.symbol} trading halted!\n"
+                f"Max drawdown {self.config.max_drawdown_pct:.1f}% exceeded.\n"
+                f"Equity: ${self.risk.equity(self.tob.mid_price):,.2f}\n"
+                f"Realized PnL: ${self.risk.pnl:,.4f}\n"
+                f"Trades: {self.risk.trade_count}"
+            )
+            return
+
         stale = self.risk.check_stale_orders(self.orders.open_orders)
         for oid in stale:
             self.orders.cancel_order(oid)
@@ -281,7 +355,7 @@ class HFTScalper:
 
         if (
             not self.orders.has_side(OrderSide.BUY)
-            and self.risk.can_place_buy()
+            and self.risk.can_place_buy(self.tob.best_bid)
             and self.orders.open_count < self.config.max_open_orders
         ):
             self.orders.create_order(
@@ -298,16 +372,22 @@ class HFTScalper:
             )
 
         if self._update_count % 50 == 0:
+            mid = self.tob.mid_price
             spread_bps = (
-                (self.tob.spread / self.tob.mid_price) * 10_000
-                if self.tob.mid_price
+                (self.tob.spread / mid) * 10_000
+                if mid
                 else 0
             )
             logger.info(
                 f"TOB bid={self.tob.best_bid:.2f} ask={self.tob.best_ask:.2f} "
                 f"spread={spread_bps:.2f}bps | "
+                f"equity=${self.risk.equity(mid):,.2f} "
                 f"bal=${self.risk.balance:.2f} pos={self.risk.position:.6f} "
-                f"pnl={self.risk.pnl:.4f} return={self.risk.return_pct:.2f}% "
+                f"unrealized_pnl=${self.risk.unrealized_pnl(mid):,.4f} "
+                f"realized_pnl={self.risk.pnl:.4f} "
+                f"return={self.risk.return_pct(mid):.2f}% "
+                f"win_rate={self.risk.win_rate:.1f}% "
+                f"max_dd={self.risk.max_drawdown_pct_seen:.2f}% "
                 f"orders={self.orders.open_count}"
             )
             self.telegram.send(
@@ -316,10 +396,14 @@ class HFTScalper:
                 f"Bid: ${self.tob.best_bid:,.2f}\n"
                 f"Ask: ${self.tob.best_ask:,.2f}\n"
                 f"Spread: {spread_bps:.2f} bps\n\n"
+                f"Equity: ${self.risk.equity(mid):,.2f}\n"
                 f"Balance: ${self.risk.balance:,.2f}\n"
-                f"PnL: ${self.risk.pnl:,.4f}\n"
-                f"Return: {self.risk.return_pct:.2f}%\n"
+                f"Unrealized PnL: ${self.risk.unrealized_pnl(mid):,.4f}\n"
+                f"Realized PnL: ${self.risk.pnl:,.4f}\n"
+                f"Return: {self.risk.return_pct(mid):.2f}%\n"
                 f"Position: {self.risk.position:.6f}\n"
+                f"Win Rate: {self.risk.win_rate:.1f}%\n"
+                f"Max Drawdown: {self.risk.max_drawdown_pct_seen:.2f}%\n"
                 f"Trades: {self.risk.trade_count}\n"
                 f"Open Orders: {self.orders.open_count}"
             )
@@ -336,6 +420,10 @@ class HFTScalper:
                     close_timeout=5,
                 ) as ws:
                     logger.info("WebSocket connected — subscribing to ticker")
+                    self.telegram.send_alert(
+                        f"✅ <b>WildBot Reconnected</b>\n"
+                        f"WebSocket connected to {self.config.ws_url}"
+                    )
                     sub_msg = json.dumps({
                         "method": "subscribe",
                         "params": {
@@ -353,8 +441,16 @@ class HFTScalper:
                             await self._handle_tick()
             except websockets.exceptions.ConnectionClosed as exc:
                 logger.warning(f"Connection closed: {exc}")
+                self.telegram.send_alert(
+                    f"⚠️ <b>WildBot Disconnected</b>\n"
+                    f"WebSocket connection closed: {exc}"
+                )
             except Exception as exc:
                 logger.error(f"WebSocket error: {exc}")
+                self.telegram.send_alert(
+                    f"⚠️ <b>WildBot Disconnected</b>\n"
+                    f"WebSocket error: {exc}"
+                )
 
             if self._running:
                 self.orders.cancel_all()
@@ -389,8 +485,14 @@ class HFTScalper:
     def stop(self):
         self._running = False
         self.orders.cancel_all()
+        mid = self.tob.mid_price if self.tob.mid_price > 0 else 0.0
         logger.info(
-            f"Scalper stopped | bal=${self.risk.balance:.2f} trades={self.risk.trade_count} "
-            f"pnl={self.risk.pnl:.4f} return={self.risk.return_pct:.2f}% "
+            f"Scalper stopped | equity=${self.risk.equity(mid):,.2f} "
+            f"bal=${self.risk.balance:.2f} trades={self.risk.trade_count} "
+            f"realized_pnl={self.risk.pnl:.4f} "
+            f"unrealized_pnl={self.risk.unrealized_pnl(mid):.4f} "
+            f"return={self.risk.return_pct(mid):.2f}% "
+            f"win_rate={self.risk.win_rate:.1f}% "
+            f"max_drawdown={self.risk.max_drawdown_pct_seen:.2f}% "
             f"final_pos={self.risk.position:.6f}"
         )

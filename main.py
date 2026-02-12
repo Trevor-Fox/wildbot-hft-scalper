@@ -4,7 +4,7 @@ import signal
 import threading
 import time
 
-from flask import Flask, jsonify
+from flask import Flask, jsonify, render_template
 from hft_scalper import HFTScalper, ScalperConfig
 
 app = Flask(__name__)
@@ -33,17 +33,34 @@ def run_scalper():
         loop.close()
 
 
+@app.after_request
+def add_cache_headers(response):
+    response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+    return response
+
+
 @app.route("/")
-def index():
+def dashboard():
+    return render_template("dashboard.html")
+
+
+@app.route("/api/status")
+def api_status():
+    mid = scalper.tob.mid_price
     return jsonify({
         "status": "running" if scalper._running else "stopped",
         "symbol": scalper.config.symbol,
         "starting_capital": scalper.risk.starting_capital,
         "balance": round(scalper.risk.balance, 2),
-        "return_pct": round(scalper.risk.return_pct, 2),
+        "equity": round(scalper.risk.equity(mid), 2),
+        "unrealized_pnl": round(scalper.risk.unrealized_pnl(mid), 4),
+        "return_pct": round(scalper.risk.return_pct(mid), 2),
         "position": scalper.risk.position,
         "pnl": round(scalper.risk.pnl, 4),
         "trade_count": scalper.risk.trade_count,
+        "win_rate": round(scalper.risk.win_rate, 2),
+        "max_drawdown_pct": round(scalper.risk.max_drawdown_pct_seen, 2),
+        "is_stopped": scalper.risk.is_stopped,
         "open_orders": scalper.orders.open_count,
         "tob": {
             "best_bid": scalper.tob.best_bid,
