@@ -5,6 +5,7 @@ import time
 import logging
 import threading
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Optional
 
@@ -26,6 +27,8 @@ class TelegramNotifier:
         self.enabled = bool(self.token and self.chat_id)
         self.min_interval = min_interval
         self._last_send_time: float = 0
+        self._daily_summary_hour: int = 0
+        self._last_daily_summary_date: str = ""
         if self.enabled:
             logger.info("Telegram notifications enabled")
         else:
@@ -43,7 +46,36 @@ class TelegramNotifier:
     def send_alert(self, message: str):
         if not self.enabled:
             return
+        now = time.time()
+        if now - self._last_send_time < 5.0:
+            return
+        self._last_send_time = now
         threading.Thread(target=self._send_sync, args=(message,), daemon=True).start()
+
+    def check_daily_summary(self, stats: dict):
+        if not self.enabled:
+            return
+        now_utc = datetime.now(timezone.utc)
+        today_str = now_utc.strftime("%Y-%m-%d")
+        if today_str != self._last_daily_summary_date and now_utc.hour >= self._daily_summary_hour:
+            self._last_daily_summary_date = today_str
+            msg = (
+                f"📊 <b>WildBot Daily Summary</b>\n"
+                f"Date: {today_str}\n\n"
+                f"Equity: ${stats.get('equity', 0):,.2f}\n"
+                f"Balance: ${stats.get('balance', 0):,.2f}\n"
+                f"Realized PnL: ${stats.get('pnl', 0):,.4f}\n"
+                f"Return: {stats.get('return_pct', 0):.2f}%\n"
+                f"Position: {stats.get('position', 0):.6f}\n"
+                f"Trades: {stats.get('trade_count', 0)}\n"
+                f"Win Rate: {stats.get('win_rate', 0):.1f}%\n"
+                f"Wins: {stats.get('wins', 0)} | Losses: {stats.get('losses', 0)}\n"
+                f"Max Drawdown: {stats.get('max_drawdown', 0):.2f}%\n"
+                f"EMA: ${stats.get('ema', 0):,.2f}\n"
+                f"Momentum: {stats.get('momentum', 'neutral')}\n"
+                f"Ticks: {stats.get('ticks', 0)}"
+            )
+            threading.Thread(target=self._send_sync, args=(msg,), daemon=True).start()
 
     def _send_sync(self, message: str):
         try:
@@ -101,6 +133,12 @@ class TopOfBook:
             return (self.best_ask + self.best_bid) / 2.0
         return 0.0
 
+    @property
+    def microprice(self) -> float:
+        if self.bid_qty + self.ask_qty > 0 and self.best_bid > 0 and self.best_ask > 0:
+            return (self.best_bid * self.ask_qty + self.best_ask * self.bid_qty) / (self.bid_qty + self.ask_qty)
+        return self.mid_price
+
 
 @dataclass
 class ScalperConfig:
@@ -117,6 +155,10 @@ class ScalperConfig:
     reconnect_delay: float = 1.0
     max_reconnect_delay: float = 30.0
     max_drawdown_pct: float = 50.0
+    fill_cooldown_ms: float = 200.0
+    skew_factor: float = 0.5
+    ema_window: int = 50
+    momentum_filter_enabled: bool = True
 
 
 class RiskManager:
@@ -134,13 +176,19 @@ class RiskManager:
         self.peak_equity: float = config.starting_capital
         self.max_drawdown_pct_seen: float = 0.0
         self.is_stopped: bool = False
-        self._prev_pnl: float = 0.0
+        self.avg_entry_price: float = 0.0
+        self._trip_cost: float = 0.0
 
     def unrealized_pnl(self, mid_price: float) -> float:
+        if self.position == 0 or self.avg_entry_price == 0:
+            return 0.0
+        return self.position * (mid_price - self.avg_entry_price)
+
+    def position_value(self, mid_price: float) -> float:
         return self.position * mid_price
 
     def equity(self, mid_price: float) -> float:
-        return self.balance + self.unrealized_pnl(mid_price)
+        return self.balance + self.position_value(mid_price)
 
     def return_pct(self, mid_price: float) -> float:
         if self.starting_capital > 0:
@@ -162,32 +210,82 @@ class RiskManager:
         spread_bps = (tob.spread / tob.mid_price) * 10_000
         return spread_bps <= self.config.max_spread_bps
 
+    def _close_trip(self):
+        if self._trip_cost > 1e-10:
+            self.wins += 1
+            self.total_profit += self._trip_cost
+        elif self._trip_cost < -1e-10:
+            self.losses += 1
+            self.total_loss += abs(self._trip_cost)
+        self._trip_cost = 0.0
+
     def record_fill(self, side: OrderSide, price: float, qty: float):
+        old_pos = self.position
         cost = price * qty
+
         if side == OrderSide.BUY:
-            self.position += qty
             self.balance -= cost
             self.pnl -= cost
+
+            if old_pos >= 0:
+                total_cost = self.avg_entry_price * old_pos + price * qty
+                self.position = old_pos + qty
+                self.avg_entry_price = total_cost / self.position if self.position != 0 else 0.0
+                self._trip_cost -= cost
+            elif old_pos + qty <= 0:
+                self.position = old_pos + qty
+                self._trip_cost -= cost
+            else:
+                close_qty = abs(old_pos)
+                open_qty = qty - close_qty
+                self._trip_cost -= price * close_qty
+                self._close_trip()
+                self.position = open_qty
+                self.avg_entry_price = price
+                self._trip_cost = -(price * open_qty)
         else:
-            self.position -= qty
             self.balance += cost
             self.pnl += cost
+
+            if old_pos <= 0:
+                total_cost = abs(self.avg_entry_price * old_pos) + price * qty
+                self.position = old_pos - qty
+                self.avg_entry_price = total_cost / abs(self.position) if self.position != 0 else 0.0
+                self._trip_cost += cost
+            elif old_pos - qty >= 0:
+                self.position = old_pos - qty
+                self._trip_cost += cost
+            else:
+                close_qty = old_pos
+                open_qty = qty - close_qty
+                self._trip_cost += price * close_qty
+                self._close_trip()
+                self.position = -open_qty
+                self.avg_entry_price = price
+                self._trip_cost = price * open_qty
+
         self.trade_count += 1
 
-        pnl_change = self.pnl - self._prev_pnl
-        if pnl_change > 0:
-            self.wins += 1
-            self.total_profit += pnl_change
-        elif pnl_change < 0:
-            self.losses += 1
-            self.total_loss += abs(pnl_change)
-        self._prev_pnl = self.pnl
+        if abs(self.position) < 1e-12:
+            self.position = 0.0
+            self._close_trip()
+            self.avg_entry_price = 0.0
 
         logger.info(
             f"Fill: {side.value} {qty}@{price:.2f} | "
             f"bal=${self.balance:.2f} pos={self.position:.6f} "
-            f"pnl={self.pnl:.4f} trades={self.trade_count}"
+            f"pnl={self.pnl:.4f} trades={self.trade_count} "
+            f"avg_entry={self.avg_entry_price:.2f}"
         )
+
+    def calculate_skewed_prices(self, tob: TopOfBook) -> tuple[float, float]:
+        inventory_ratio = self.position / self.config.max_position if self.config.max_position > 0 else 0
+        skew = inventory_ratio * self.config.skew_factor
+        half_spread = tob.spread / 2
+        mid = tob.microprice
+        buy_price = round(mid - half_spread - skew * tob.spread, 2)
+        sell_price = round(mid + half_spread - skew * tob.spread, 2)
+        return buy_price, sell_price
 
     def update_drawdown(self, mid_price: float):
         eq = self.equity(mid_price)
@@ -227,9 +325,11 @@ class RiskManager:
 
 
 class OrderManager:
-    def __init__(self):
+    def __init__(self, config: ScalperConfig):
         self._open_orders: dict[str, Order] = {}
         self._seq: int = 0
+        self._last_fill_time: float = 0.0
+        self._fill_cooldown_ms: float = config.fill_cooldown_ms
 
     @property
     def open_orders(self) -> dict[str, Order]:
@@ -271,15 +371,22 @@ class OrderManager:
         return count
 
     def simulate_fill_check(self, tob: TopOfBook) -> list[Order]:
+        now_ms = time.monotonic() * 1000
+        if now_ms - self._last_fill_time < self._fill_cooldown_ms:
+            return []
         filled = []
         for oid in list(self._open_orders):
             order = self._open_orders[oid]
             if order.side == OrderSide.BUY and tob.best_ask <= order.price:
                 order.status = OrderStatus.FILLED
                 filled.append(self._open_orders.pop(oid))
+                self._last_fill_time = now_ms
+                break
             elif order.side == OrderSide.SELL and tob.best_bid >= order.price:
                 order.status = OrderStatus.FILLED
                 filled.append(self._open_orders.pop(oid))
+                self._last_fill_time = now_ms
+                break
         return filled
 
     def has_side(self, side: OrderSide) -> bool:
@@ -291,10 +398,37 @@ class HFTScalper:
         self.config = config or ScalperConfig()
         self.tob = TopOfBook()
         self.risk = RiskManager(self.config)
-        self.orders = OrderManager()
+        self.orders = OrderManager(self.config)
         self.telegram = TelegramNotifier()
         self._running = False
         self._update_count = 0
+        self._ema: float = 0.0
+        self._ema_alpha: float = 2.0 / (self.config.ema_window + 1)
+        self._trade_history: list[dict] = []
+        self._drawdown_alerted: bool = False
+
+    @property
+    def momentum_signal(self) -> str:
+        if self._ema == 0:
+            return "neutral"
+        mid = self.tob.mid_price
+        if mid <= 0:
+            return "neutral"
+        diff_pct = (mid - self._ema) / self._ema * 100
+        if diff_pct > 0.01:
+            return "up"
+        elif diff_pct < -0.01:
+            return "down"
+        return "neutral"
+
+    def _update_ema(self):
+        mid = self.tob.mid_price
+        if mid <= 0:
+            return
+        if self._ema == 0:
+            self._ema = mid
+        else:
+            self._ema = self._ema_alpha * mid + (1 - self._ema_alpha) * self._ema
 
     def _parse_depth_update(self, raw: str) -> bool:
         try:
@@ -324,23 +458,36 @@ class HFTScalper:
 
     async def _handle_tick(self):
         self._update_count += 1
+        self._update_ema()
 
         filled = self.orders.simulate_fill_check(self.tob)
         for order in filled:
             self.risk.record_fill(order.side, order.price, order.quantity)
+            self._trade_history.append({
+                "time": time.time(),
+                "side": order.side.value,
+                "price": order.price,
+                "qty": order.quantity,
+                "pnl": self.risk.pnl,
+                "balance": self.risk.balance,
+            })
+            if len(self._trade_history) > 50:
+                self._trade_history = self._trade_history[-50:]
 
         self.risk.update_drawdown(self.tob.mid_price)
 
         if self.risk.is_stopped:
             self.orders.cancel_all()
-            self.telegram.send_alert(
-                f"🚨 <b>WildBot DRAWDOWN STOP</b>\n"
-                f"{self.config.symbol} trading halted!\n"
-                f"Max drawdown {self.config.max_drawdown_pct:.1f}% exceeded.\n"
-                f"Equity: ${self.risk.equity(self.tob.mid_price):,.2f}\n"
-                f"Realized PnL: ${self.risk.pnl:,.4f}\n"
-                f"Trades: {self.risk.trade_count}"
-            )
+            if not self._drawdown_alerted:
+                self._drawdown_alerted = True
+                self.telegram.send_alert(
+                    f"🚨 <b>WildBot DRAWDOWN STOP</b>\n"
+                    f"{self.config.symbol} trading halted!\n"
+                    f"Max drawdown {self.config.max_drawdown_pct:.1f}% exceeded.\n"
+                    f"Equity: ${self.risk.equity(self.tob.mid_price):,.2f}\n"
+                    f"Realized PnL: ${self.risk.pnl:,.4f}\n"
+                    f"Trades: {self.risk.trade_count}"
+                )
             return
 
         stale = self.risk.check_stale_orders(self.orders.open_orders)
@@ -353,22 +500,35 @@ class HFTScalper:
                 logger.debug("Spread too wide — cancelled all orders")
             return
 
+        buy_price, sell_price = self.risk.calculate_skewed_prices(self.tob)
+        momentum = self.momentum_signal
+
+        place_buy = True
+        place_sell = True
+        if self.config.momentum_filter_enabled:
+            if momentum == "up":
+                place_sell = False
+            elif momentum == "down":
+                place_buy = False
+
         if (
-            not self.orders.has_side(OrderSide.BUY)
-            and self.risk.can_place_buy(self.tob.best_bid)
+            place_buy
+            and not self.orders.has_side(OrderSide.BUY)
+            and self.risk.can_place_buy(buy_price)
             and self.orders.open_count < self.config.max_open_orders
         ):
             self.orders.create_order(
-                OrderSide.BUY, self.tob.best_bid, self.config.order_qty
+                OrderSide.BUY, buy_price, self.config.order_qty
             )
 
         if (
-            not self.orders.has_side(OrderSide.SELL)
+            place_sell
+            and not self.orders.has_side(OrderSide.SELL)
             and self.risk.can_place_sell()
             and self.orders.open_count < self.config.max_open_orders
         ):
             self.orders.create_order(
-                OrderSide.SELL, self.tob.best_ask, self.config.order_qty
+                OrderSide.SELL, sell_price, self.config.order_qty
             )
 
         if self._update_count % 50 == 0:
@@ -388,25 +548,50 @@ class HFTScalper:
                 f"return={self.risk.return_pct(mid):.2f}% "
                 f"win_rate={self.risk.win_rate:.1f}% "
                 f"max_dd={self.risk.max_drawdown_pct_seen:.2f}% "
-                f"orders={self.orders.open_count}"
+                f"orders={self.orders.open_count} "
+                f"microprice={self.tob.microprice:.2f} "
+                f"ema={self._ema:.2f} momentum={momentum} "
+                f"avg_entry={self.risk.avg_entry_price:.2f}"
             )
             self.telegram.send(
                 f"<b>WildBot Scalper</b>\n"
                 f"{self.config.symbol} | Tick #{self._update_count}\n\n"
                 f"Bid: ${self.tob.best_bid:,.2f}\n"
                 f"Ask: ${self.tob.best_ask:,.2f}\n"
-                f"Spread: {spread_bps:.2f} bps\n\n"
+                f"Spread: {spread_bps:.2f} bps\n"
+                f"Microprice: ${self.tob.microprice:,.2f}\n\n"
                 f"Equity: ${self.risk.equity(mid):,.2f}\n"
                 f"Balance: ${self.risk.balance:,.2f}\n"
                 f"Unrealized PnL: ${self.risk.unrealized_pnl(mid):,.4f}\n"
                 f"Realized PnL: ${self.risk.pnl:,.4f}\n"
                 f"Return: {self.risk.return_pct(mid):.2f}%\n"
                 f"Position: {self.risk.position:.6f}\n"
+                f"Avg Entry: ${self.risk.avg_entry_price:,.2f}\n"
                 f"Win Rate: {self.risk.win_rate:.1f}%\n"
                 f"Max Drawdown: {self.risk.max_drawdown_pct_seen:.2f}%\n"
                 f"Trades: {self.risk.trade_count}\n"
-                f"Open Orders: {self.orders.open_count}"
+                f"Open Orders: {self.orders.open_count}\n"
+                f"EMA: ${self._ema:,.2f}\n"
+                f"Momentum: {momentum}"
             )
+
+        if self._update_count % 500 == 0:
+            stats = {
+                "equity": self.risk.equity(self.tob.mid_price),
+                "balance": self.risk.balance,
+                "pnl": self.risk.pnl,
+                "return_pct": self.risk.return_pct(self.tob.mid_price),
+                "position": self.risk.position,
+                "trade_count": self.risk.trade_count,
+                "win_rate": self.risk.win_rate,
+                "wins": self.risk.wins,
+                "losses": self.risk.losses,
+                "max_drawdown": self.risk.max_drawdown_pct_seen,
+                "ema": self._ema,
+                "momentum": self.momentum_signal,
+                "ticks": self._update_count,
+            }
+            self.telegram.check_daily_summary(stats)
 
     async def _ws_loop(self):
         delay = self.config.reconnect_delay
@@ -470,7 +655,11 @@ class HFTScalper:
         logger.info(
             f"WildBot HFT Scalper starting | symbol={self.config.symbol} "
             f"capital=${self.config.starting_capital:.2f} "
-            f"qty={self.config.order_qty} stale_ms={self.config.stale_order_ms}"
+            f"qty={self.config.order_qty} stale_ms={self.config.stale_order_ms} "
+            f"fill_cooldown_ms={self.config.fill_cooldown_ms} "
+            f"skew_factor={self.config.skew_factor} "
+            f"ema_window={self.config.ema_window} "
+            f"momentum_filter={self.config.momentum_filter_enabled}"
         )
         try:
             await asyncio.gather(
@@ -494,5 +683,7 @@ class HFTScalper:
             f"return={self.risk.return_pct(mid):.2f}% "
             f"win_rate={self.risk.win_rate:.1f}% "
             f"max_drawdown={self.risk.max_drawdown_pct_seen:.2f}% "
-            f"final_pos={self.risk.position:.6f}"
+            f"final_pos={self.risk.position:.6f} "
+            f"avg_entry={self.risk.avg_entry_price:.2f} "
+            f"ema={self._ema:.2f}"
         )

@@ -31,51 +31,54 @@
   }
   .status-dot.running { background: #9ece6a; box-shadow: 0 0 8px #9ece6a88; }
   .status-label { font-size: 0.85rem; color: #565f89; }
-  .grid { display: grid; gap: 16px; margin-bottom: 24px; }
+  .grid { display: grid; gap: 12px; margin-bottom: 20px; }
   .grid-4 { grid-template-columns: repeat(4, 1fr); }
+  .grid-5 { grid-template-columns: repeat(5, 1fr); }
   .card {
     background: #24283b;
     border-radius: 10px;
-    padding: 18px;
+    padding: 16px;
   }
   .card-label {
-    font-size: 0.75rem;
+    font-size: 0.7rem;
     text-transform: uppercase;
     letter-spacing: 0.05em;
     color: #565f89;
-    margin-bottom: 6px;
+    margin-bottom: 4px;
   }
   .card-value {
-    font-size: 1.4rem;
+    font-size: 1.3rem;
     font-weight: 600;
     transition: color 0.3s;
   }
   .section-title {
-    font-size: 0.9rem;
+    font-size: 0.85rem;
     text-transform: uppercase;
     letter-spacing: 0.08em;
     color: #565f89;
-    margin-bottom: 12px;
+    margin-bottom: 10px;
     font-weight: 600;
   }
   .green { color: #9ece6a; }
   .red { color: #f7768e; }
   .blue { color: #7aa2f7; }
+  .yellow { color: #e0af68; }
+  .purple { color: #bb9af7; }
   .info-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
-    gap: 12px;
+    grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+    gap: 10px;
   }
   .info-item {
     background: #24283b;
     border-radius: 8px;
-    padding: 14px;
+    padding: 12px;
     display: flex;
     flex-direction: column;
-    gap: 4px;
+    gap: 3px;
   }
-  .info-label { font-size: 0.72rem; text-transform: uppercase; color: #565f89; letter-spacing: 0.04em; }
-  .info-value { font-size: 1rem; font-weight: 500; }
+  .info-label { font-size: 0.68rem; text-transform: uppercase; color: #565f89; letter-spacing: 0.04em; }
+  .info-value { font-size: 0.95rem; font-weight: 500; }
   .stopped-badge {
     display: inline-block;
     background: #f7768e22;
@@ -85,11 +88,57 @@
     font-size: 0.85rem;
     font-weight: 600;
   }
-  @media (max-width: 800px) {
+  .momentum-badge {
+    display: inline-block;
+    padding: 2px 10px;
+    border-radius: 4px;
+    font-size: 0.8rem;
+    font-weight: 600;
+  }
+  .momentum-up { background: #9ece6a22; color: #9ece6a; }
+  .momentum-down { background: #f7768e22; color: #f7768e; }
+  .momentum-neutral { background: #565f8922; color: #565f89; }
+  .trade-table-wrap {
+    background: #24283b;
+    border-radius: 10px;
+    padding: 16px;
+    margin-bottom: 20px;
+    overflow-x: auto;
+  }
+  .trade-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.82rem;
+  }
+  .trade-table th {
+    text-align: left;
+    padding: 8px 10px;
+    color: #565f89;
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    border-bottom: 1px solid #363b54;
+  }
+  .trade-table td {
+    padding: 6px 10px;
+    border-bottom: 1px solid #1a1b26;
+  }
+  .trade-table tr:last-child td { border-bottom: none; }
+  .trade-table .buy-row { color: #9ece6a; }
+  .trade-table .sell-row { color: #f7768e; }
+  .empty-trades {
+    color: #565f89;
+    text-align: center;
+    padding: 24px;
+    font-size: 0.85rem;
+  }
+  @media (max-width: 900px) {
     .grid-4 { grid-template-columns: repeat(2, 1fr); }
+    .grid-5 { grid-template-columns: repeat(2, 1fr); }
   }
   @media (max-width: 480px) {
     .grid-4 { grid-template-columns: 1fr; }
+    .grid-5 { grid-template-columns: 1fr; }
   }
 </style>
 </head>
@@ -119,7 +168,7 @@
   </div>
 </div>
 
-<div class="grid grid-4">
+<div class="grid grid-5">
   <div class="card">
     <div class="card-label">Realized PnL</div>
     <div class="card-value mono" id="realizedPnl">—</div>
@@ -127,6 +176,10 @@
   <div class="card">
     <div class="card-label">Unrealized PnL</div>
     <div class="card-value mono" id="unrealizedPnl">—</div>
+  </div>
+  <div class="card">
+    <div class="card-label">Win / Loss</div>
+    <div class="card-value mono" id="winLoss">—</div>
   </div>
   <div class="card">
     <div class="card-label">Win Rate %</div>
@@ -139,7 +192,7 @@
 </div>
 
 <div class="section-title">Market Data</div>
-<div class="info-grid" style="margin-bottom:24px;">
+<div class="info-grid" style="margin-bottom:20px;">
   <div class="info-item">
     <span class="info-label">Symbol</span>
     <span class="info-value blue" id="symbol">—</span>
@@ -157,33 +210,76 @@
     <span class="info-value mono" id="spread">—</span>
   </div>
   <div class="info-item">
-    <span class="info-label">Open Orders</span>
-    <span class="info-value mono blue" id="openOrders">—</span>
+    <span class="info-label">Microprice</span>
+    <span class="info-value mono purple" id="microprice">—</span>
   </div>
   <div class="info-item">
     <span class="info-label">Position</span>
     <span class="info-value mono" id="position">—</span>
   </div>
+  <div class="info-item">
+    <span class="info-label">Avg Entry</span>
+    <span class="info-value mono yellow" id="avgEntry">—</span>
+  </div>
+  <div class="info-item">
+    <span class="info-label">Open Orders</span>
+    <span class="info-value mono blue" id="openOrders">—</span>
+  </div>
+</div>
+
+<div class="section-title">Strategy Indicators</div>
+<div class="info-grid" style="margin-bottom:20px;">
+  <div class="info-item">
+    <span class="info-label">EMA (50)</span>
+    <span class="info-value mono purple" id="ema">—</span>
+  </div>
+  <div class="info-item">
+    <span class="info-label">Momentum</span>
+    <span class="info-value" id="momentum">—</span>
+  </div>
+  <div class="info-item">
+    <span class="info-label">Inventory Skew</span>
+    <span class="info-value mono" id="inventorySkew">—</span>
+  </div>
+  <div class="info-item">
+    <span class="info-label">Status</span>
+    <span class="info-value" id="stoppedStatus">—</span>
+  </div>
 </div>
 
 <div class="section-title">Activity</div>
-<div class="info-grid">
+<div class="info-grid" style="margin-bottom:20px;">
   <div class="info-item">
     <span class="info-label">Uptime</span>
     <span class="info-value mono" id="uptime">—</span>
   </div>
   <div class="info-item">
-    <span class="info-label">Updates Processed</span>
+    <span class="info-label">Ticks Processed</span>
     <span class="info-value mono blue" id="updates">—</span>
   </div>
   <div class="info-item">
     <span class="info-label">Starting Capital</span>
     <span class="info-value mono" id="startingCapital">—</span>
   </div>
-  <div class="info-item">
-    <span class="info-label">Status</span>
-    <span class="info-value" id="stoppedStatus">—</span>
-  </div>
+</div>
+
+<div class="section-title">Recent Trades</div>
+<div class="trade-table-wrap">
+  <table class="trade-table" id="tradeTable">
+    <thead>
+      <tr>
+        <th>Time</th>
+        <th>Side</th>
+        <th>Price</th>
+        <th>Qty</th>
+        <th>Cum. PnL</th>
+        <th>Balance</th>
+      </tr>
+    </thead>
+    <tbody id="tradeBody">
+      <tr><td colspan="6" class="empty-trades">No trades yet</td></tr>
+    </tbody>
+  </table>
 </div>
 
 <script>
@@ -199,6 +295,11 @@ function formatUptime(s) {
 function formatSpreadBps(spread, mid) {
   if (!mid || mid === 0) return '—';
   return ((spread / mid) * 10000).toFixed(2);
+}
+
+function formatTime(ts) {
+  var d = new Date(ts * 1000);
+  return d.toLocaleTimeString();
 }
 
 function update() {
@@ -232,7 +333,13 @@ function update() {
       upEl.textContent = '$' + d.unrealized_pnl.toFixed(4);
       upEl.className = 'card-value mono ' + pnlColor(d.unrealized_pnl);
 
-      document.getElementById('winRate').textContent = d.win_rate.toFixed(2) + '%';
+      var wlEl = document.getElementById('winLoss');
+      wlEl.innerHTML = '<span class="green">' + d.wins + 'W</span> / <span class="red">' + d.losses + 'L</span>';
+
+      document.getElementById('winRate').textContent = d.win_rate.toFixed(1) + '%';
+      var wrEl = document.getElementById('winRate');
+      wrEl.className = 'card-value mono ' + (d.win_rate >= 50 ? 'green' : d.win_rate > 0 ? 'yellow' : '');
+
       document.getElementById('maxDrawdown').textContent = d.max_drawdown_pct.toFixed(2) + '%';
 
       document.getElementById('symbol').textContent = d.symbol;
@@ -242,19 +349,57 @@ function update() {
       document.getElementById('bestBid').textContent = mid > 0 ? tob.best_bid.toFixed(2) : '—';
       document.getElementById('bestAsk').textContent = mid > 0 ? tob.best_ask.toFixed(2) : '—';
       document.getElementById('spread').textContent = formatSpreadBps(tob.spread, mid);
+      document.getElementById('microprice').textContent = mid > 0 ? tob.microprice.toFixed(2) : '—';
       document.getElementById('openOrders').textContent = d.open_orders;
-      document.getElementById('position').textContent = d.position;
+      document.getElementById('position').textContent = d.position.toFixed(6);
+
+      var avgEl = document.getElementById('avgEntry');
+      avgEl.textContent = d.avg_entry_price > 0 ? '$' + d.avg_entry_price.toFixed(2) : '—';
+
+      document.getElementById('ema').textContent = d.ema > 0 ? d.ema.toFixed(2) : '—';
+
+      var momEl = document.getElementById('momentum');
+      var momClass = d.momentum === 'up' ? 'momentum-up' : d.momentum === 'down' ? 'momentum-down' : 'momentum-neutral';
+      momEl.innerHTML = '<span class="momentum-badge ' + momClass + '">' + d.momentum.toUpperCase() + '</span>';
+
+      var skewEl = document.getElementById('inventorySkew');
+      var skewVal = d.position / 0.01;
+      var skewDir = skewVal > 0.01 ? 'LONG bias' : skewVal < -0.01 ? 'SHORT bias' : 'Neutral';
+      var skewColor = skewVal > 0.01 ? 'green' : skewVal < -0.01 ? 'red' : '';
+      skewEl.textContent = skewDir + ' (' + (skewVal * 100).toFixed(0) + '%)';
+      skewEl.className = 'info-value mono ' + skewColor;
 
       document.getElementById('uptime').textContent = formatUptime(d.uptime);
-      document.getElementById('updates').textContent = d.updates_processed;
+      document.getElementById('updates').textContent = d.updates_processed.toLocaleString();
       document.getElementById('startingCapital').textContent = '$' + d.starting_capital.toFixed(2);
 
       var stEl = document.getElementById('stoppedStatus');
       if (d.is_stopped) {
-        stEl.innerHTML = '<span class="stopped-badge">STOPPED — Drawdown Triggered</span>';
+        stEl.innerHTML = '<span class="stopped-badge">STOPPED — Drawdown</span>';
       } else {
         stEl.textContent = 'Active';
         stEl.className = 'info-value green';
+      }
+
+      var tbody = document.getElementById('tradeBody');
+      var trades = d.trade_history || [];
+      if (trades.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="6" class="empty-trades">No trades yet</td></tr>';
+      } else {
+        var rows = '';
+        for (var i = trades.length - 1; i >= 0; i--) {
+          var t = trades[i];
+          var rowClass = t.side === 'buy' ? 'buy-row' : 'sell-row';
+          rows += '<tr class="' + rowClass + '">';
+          rows += '<td class="mono">' + formatTime(t.time) + '</td>';
+          rows += '<td>' + t.side.toUpperCase() + '</td>';
+          rows += '<td class="mono">$' + t.price.toFixed(2) + '</td>';
+          rows += '<td class="mono">' + t.qty + '</td>';
+          rows += '<td class="mono">' + t.pnl.toFixed(4) + '</td>';
+          rows += '<td class="mono">$' + t.balance.toFixed(2) + '</td>';
+          rows += '</tr>';
+        }
+        tbody.innerHTML = rows;
       }
     })
     .catch(function() {
