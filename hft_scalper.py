@@ -514,6 +514,8 @@ class HFTScalper:
         self._drawdown_alerted: bool = False
         self._live_fill_poll_interval: float = 1.0
         self._last_live_fill_poll: float = 0.0
+        self._balance_refresh_interval: float = 60.0
+        self._last_balance_refresh: float = 0.0
 
     @property
     def momentum_signal(self) -> str:
@@ -575,6 +577,9 @@ class HFTScalper:
                 filled = self.orders.check_fills_live()
             else:
                 filled = []
+            if now - self._last_balance_refresh >= self._balance_refresh_interval:
+                self._last_balance_refresh = now
+                self._refresh_live_balance()
         else:
             filled = self.orders.simulate_fill_check(self.tob)
         for order in filled:
@@ -766,6 +771,25 @@ class HFTScalper:
                 self.orders.cancel_order(oid)
             await asyncio.sleep(0.1)
 
+    def _refresh_live_balance(self):
+        if not self._kraken:
+            return
+        try:
+            balances = self._kraken.get_balance()
+            usd_bal = 0.0
+            for key in ["ZUSD", "USD", "USDT", "ZUSDT", "USDC", "ZUSDC"]:
+                if key in balances and balances[key] > 0:
+                    usd_bal += balances[key]
+            old_bal = self.risk.balance
+            if self.risk.position == 0 and self.risk.trade_count == 0:
+                self.risk.balance = usd_bal
+                self.risk.starting_capital = usd_bal
+                self.risk.peak_equity = usd_bal
+            if abs(usd_bal - old_bal) > 0.01 and self.risk.trade_count == 0:
+                logger.info(f"Balance refreshed: ${old_bal:,.2f} → ${usd_bal:,.2f}")
+        except Exception as exc:
+            logger.warning(f"Balance refresh failed: {exc}")
+
     def _initialize_live_balance(self):
         if not self.config.live_mode or not self._kraken:
             return
@@ -782,8 +806,13 @@ class HFTScalper:
                 return
 
             balances = self._kraken.get_balance()
-            usd_bal = balances.get("ZUSD", 0.0)
-            btc_bal = balances.get("XXBT", 0.0)
+            logger.info(f"Kraken balance response: {balances}")
+            usd_bal = 0.0
+            for key in ["ZUSD", "USD", "USDT", "ZUSDT", "USDC", "ZUSDC"]:
+                if key in balances and balances[key] > 0:
+                    usd_bal += balances[key]
+                    logger.info(f"Found USD balance in {key}: {balances[key]}")
+            btc_bal = balances.get("XXBT", balances.get("XBT", 0.0))
 
             self.risk.starting_capital = usd_bal
             self.risk.balance = usd_bal

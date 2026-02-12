@@ -11,12 +11,12 @@ from kraken_client import KrakenClient
 app = Flask(__name__)
 
 config = ScalperConfig(
-    symbol="BTC/USD",
+    symbol="BTC/USDC",
     ws_url="wss://ws.kraken.com/v2",
-    ws_symbol="BTC/USD",
-    rest_pair="XBTUSD",
+    ws_symbol="BTC/USDC",
+    rest_pair="XBTUSDC",
     starting_capital=16.0,
-    order_qty=0.001,
+    order_qty=0.0001,
     max_spread_bps=10.0,
     stale_order_ms=500.0,
     max_position=0.01,
