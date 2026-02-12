@@ -47,8 +47,8 @@ class KrakenClient:
 
         now = time.time()
         elapsed = now - self._last_request_time
-        if elapsed < 0.2:
-            time.sleep(0.2 - elapsed)
+        if elapsed < 1.0:
+            time.sleep(1.0 - elapsed)
 
         data["nonce"] = int(time.time() * 1000)
         urlpath = f"/0/private/{endpoint}"

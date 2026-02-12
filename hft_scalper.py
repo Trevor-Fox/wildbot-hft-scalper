@@ -307,11 +307,11 @@ class RiskManager:
         mid = tob.microprice
 
         if self.position > 1e-12:
-            exit_offset = mid * (2 * self.config.maker_fee_bps + self.config.min_profit_bps) / 10_000
+            exit_offset = mid * (self.config.maker_fee_bps + self.config.min_profit_bps) / 10_000
             buy_price = round(tob.best_bid - self.config.tick_size, 2)
             sell_price = round(max(self.avg_entry_price + exit_offset, tob.best_ask), 2)
         elif self.position < -1e-12:
-            exit_offset = mid * (2 * self.config.maker_fee_bps + self.config.min_profit_bps) / 10_000
+            exit_offset = mid * (self.config.maker_fee_bps + self.config.min_profit_bps) / 10_000
             buy_price = round(min(self.avg_entry_price - exit_offset, tob.best_bid), 2)
             sell_price = round(tob.best_ask + self.config.tick_size, 2)
         else:
@@ -533,7 +533,12 @@ class OrderManager:
                         logger.info(f"LIVE order {status}: {txid}")
             return filled
         except Exception as exc:
-            logger.warning(f"LIVE fill check failed: {exc}")
+            if "Rate limit" in str(exc):
+                self._fill_backoff = min(getattr(self, '_fill_backoff', 5.0) * 2, 30.0)
+                logger.warning(f"LIVE fill check rate limited, backing off to {self._fill_backoff:.0f}s")
+            else:
+                self._fill_backoff = 5.0
+                logger.warning(f"LIVE fill check failed: {exc}")
             return []
 
     def simulate_fill_check(self, tob: TopOfBook) -> list[Order]:
@@ -573,9 +578,9 @@ class HFTScalper:
         self._ema_alpha: float = 2.0 / (self.config.ema_window + 1)
         self._trade_history: list[dict] = []
         self._drawdown_alerted: bool = False
-        self._live_fill_poll_interval: float = 1.0
+        self._live_fill_poll_interval: float = 5.0
         self._last_live_fill_poll: float = 0.0
-        self._balance_refresh_interval: float = 60.0
+        self._balance_refresh_interval: float = 300.0
         self._last_balance_refresh: float = 0.0
         self._live_balance_deferred: bool = False
 
@@ -644,9 +649,12 @@ class HFTScalper:
 
         if self.config.live_mode:
             now = time.monotonic()
-            if now - self._last_live_fill_poll >= self._live_fill_poll_interval:
+            fill_interval = getattr(self.orders, '_fill_backoff', self._live_fill_poll_interval)
+            if now - self._last_live_fill_poll >= fill_interval:
                 self._last_live_fill_poll = now
                 filled = self.orders.check_fills_live()
+                if filled:
+                    self.orders._fill_backoff = self._live_fill_poll_interval
             else:
                 filled = []
             if self.orders._filled_during_cancel:

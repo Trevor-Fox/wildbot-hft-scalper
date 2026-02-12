@@ -14,7 +14,7 @@ WildBot is a high-frequency trading (HFT) scalping bot that connects to Kraken v
   - `OrderManager` — Dual-mode order management: paper (simulated fills) and live (Kraken REST API orders with exponential backoff on errors)
   - `ScalperConfig` — All tunable parameters including `live_mode` and `rest_pair`
   - `TelegramNotifier` — Rate-limited notifications, alerts, daily summaries
-- `kraken_client.py` — Kraken REST API client with HMAC-SHA512 authentication for AddOrder, CancelOrder, CancelAll, Balance, OpenOrders, QueryOrders. Includes 200ms rate limiting between API calls.
+- `kraken_client.py` — Kraken REST API client with HMAC-SHA512 authentication for AddOrder, CancelOrder, CancelAll, Balance, OpenOrders, QueryOrders. Includes 1s rate limiting between API calls.
 - `templates/dashboard.html` — Live-updating dark-themed trading dashboard with LIVE/PAPER mode indicator (auto-refreshes every 2s)
 
 ### Key Features
@@ -103,7 +103,11 @@ WildBot is a high-frequency trading (HFT) scalping bot that connects to Kraken v
 - `SESSION_SECRET` — Flask session secret
 
 ## Recent Changes
-- 2026-02-12: Fee-aware pricing: buy/sell prices offset by maker fee (16bps) + profit target (2bps) to ensure round trips are profitable after Kraken fees
+- 2026-02-12: Tightened exit offset from 2x maker fee (33bps/$216) to 1x maker fee + profit (20bps/$131) for faster trade completion
+- 2026-02-12: Increased API rate limit from 200ms to 1s between calls to prevent Kraken rate limiting
+- 2026-02-12: Increased fill poll interval from 1s to 5s and balance refresh from 60s to 300s to reduce API load
+- 2026-02-12: Set up VM deployment for 24/7 operation (bot no longer sleeps when Replit is inactive)
+- 2026-02-12: Fee-aware pricing: buy/sell prices offset by maker fee (16bps) + profit target (4bps) to ensure round trips are profitable after Kraken fees
 - 2026-02-12: Fee tracking in record_fill: deducts estimated maker fee from balance/pnl, tracks total fees_paid, includes fees in trip_cost for accurate win/loss
 - 2026-02-12: Increased stale_order_ms to 5000 (from 500) and max_spread_bps to 50 to accommodate wider fee-aware quotes
 - 2026-02-12: Enhanced Telegram messages: fill alerts with fee info, periodic updates with fees paid, LIVE/PAPER mode indicators, total PnL breakdown

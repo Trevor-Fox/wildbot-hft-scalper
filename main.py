@@ -46,7 +46,7 @@ config = ScalperConfig(
     max_open_orders=2,
     live_mode=True,
     maker_fee_bps=16.0,
-    min_profit_bps=1.0,
+    min_profit_bps=4.0,
 )
 
 kraken = KrakenClient()
