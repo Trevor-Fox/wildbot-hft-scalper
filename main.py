@@ -1,12 +1,20 @@
 import asyncio
 import os
 import signal
+import subprocess
 import threading
 import time
 
 from flask import Flask, jsonify, render_template
 from hft_scalper import HFTScalper, ScalperConfig
 from kraken_client import KrakenClient
+
+port = int(os.environ.get("PORT", 5000))
+try:
+    subprocess.run(["fuser", "-k", f"{port}/tcp"], capture_output=True, timeout=5)
+    time.sleep(1)
+except Exception:
+    pass
 
 app = Flask(__name__)
 
@@ -95,5 +103,4 @@ scalper_thread = threading.Thread(target=run_scalper, daemon=True)
 scalper_thread.start()
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)

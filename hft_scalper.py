@@ -345,6 +345,8 @@ class OrderManager:
         self._consecutive_errors: int = 0
         self._last_error_time: float = 0.0
         self._error_backoff: float = 2.0
+        self._filled_during_cancel: list[Order] = []
+        self._needs_balance_sync: bool = False
 
     @property
     def open_orders(self) -> dict[str, Order]:
@@ -404,20 +406,52 @@ class OrderManager:
             self._last_error_time = now
             self._error_backoff = min(60.0, 2.0 * (2 ** self._consecutive_errors))
             logger.warning(f"LIVE order failed ({self._consecutive_errors}x, backoff={self._error_backoff:.0f}s): {exc}")
+            if "Insufficient funds" in str(exc):
+                self._needs_balance_sync = True
             return None
 
     def cancel_order(self, order_id: str) -> Optional[Order]:
-        order = self._open_orders.pop(order_id, None)
-        if order:
-            order.status = OrderStatus.CANCELLED
-            if self._live_mode and self._kraken:
-                try:
-                    self._kraken.cancel_order(order_id)
-                    logger.info(f"LIVE cancelled order {order_id}")
-                except Exception as exc:
+        order = self._open_orders.get(order_id)
+        if not order:
+            return None
+        if self._live_mode and self._kraken:
+            try:
+                self._kraken.cancel_order(order_id)
+                order.status = OrderStatus.CANCELLED
+                self._open_orders.pop(order_id, None)
+                logger.info(f"LIVE cancelled order {order_id}")
+            except Exception as exc:
+                err_str = str(exc)
+                if "Unknown order" in err_str:
+                    try:
+                        result = self._kraken.query_orders([order_id])
+                        info = result.get(order_id, {})
+                        status = info.get("status", "")
+                        if status == "closed":
+                            vol_exec = float(info.get("vol_exec", order.quantity))
+                            avg_price = float(info.get("price", order.price))
+                            if avg_price <= 0:
+                                avg_price = order.price
+                            order.status = OrderStatus.FILLED
+                            order.quantity = vol_exec
+                            order.price = avg_price
+                            self._open_orders.pop(order_id, None)
+                            self._filled_during_cancel.append(order)
+                            logger.info(f"LIVE order {order_id} was FILLED before cancel: {order.side.value} {vol_exec}@{avg_price:.2f}")
+                            return order
+                    except Exception:
+                        pass
+                    order.status = OrderStatus.CANCELLED
+                    self._open_orders.pop(order_id, None)
+                    logger.info(f"LIVE order {order_id} gone from exchange (likely filled or expired)")
+                else:
                     logger.warning(f"LIVE cancel failed for {order_id}: {exc}")
-            else:
-                logger.info(f"Cancelled order {order_id}")
+                    order.status = OrderStatus.CANCELLED
+                    self._open_orders.pop(order_id, None)
+        else:
+            order.status = OrderStatus.CANCELLED
+            self._open_orders.pop(order_id, None)
+            logger.info(f"Cancelled order {order_id}")
         return order
 
     def cancel_all(self) -> int:
@@ -516,6 +550,7 @@ class HFTScalper:
         self._last_live_fill_poll: float = 0.0
         self._balance_refresh_interval: float = 60.0
         self._last_balance_refresh: float = 0.0
+        self._live_balance_deferred: bool = False
 
     @property
     def momentum_signal(self) -> str:
@@ -570,6 +605,16 @@ class HFTScalper:
         self._update_count += 1
         self._update_ema()
 
+        if self.config.live_mode and self._live_balance_deferred and self.tob.mid_price > 0:
+            self._live_balance_deferred = False
+            if self.risk.position > 0:
+                btc_value = self.risk.position * self.tob.mid_price
+                total = self.risk.balance + btc_value
+                self.risk.starting_capital = total
+                self.risk.peak_equity = total
+                self.risk.avg_entry_price = self.tob.mid_price
+                logger.info(f"Deferred balance init: BTC value=${btc_value:,.2f} total=${total:,.2f}")
+
         if self.config.live_mode:
             now = time.monotonic()
             if now - self._last_live_fill_poll >= self._live_fill_poll_interval:
@@ -577,6 +622,13 @@ class HFTScalper:
                 filled = self.orders.check_fills_live()
             else:
                 filled = []
+            if self.orders._filled_during_cancel:
+                filled.extend(self.orders._filled_during_cancel)
+                self.orders._filled_during_cancel.clear()
+            if self.orders._needs_balance_sync:
+                self.orders._needs_balance_sync = False
+                self._refresh_live_balance()
+                logger.info("Balance synced after insufficient funds error")
             if now - self._last_balance_refresh >= self._balance_refresh_interval:
                 self._last_balance_refresh = now
                 self._refresh_live_balance()
@@ -814,11 +866,20 @@ class HFTScalper:
                     logger.info(f"Found USD balance in {key}: {balances[key]}")
             btc_bal = balances.get("XXBT", balances.get("XBT", 0.0))
 
-            self.risk.starting_capital = usd_bal
             self.risk.balance = usd_bal
-            self.risk.peak_equity = usd_bal
             self.risk.position = btc_bal
             self.risk.avg_entry_price = 0.0
+            self.risk.starting_capital = usd_bal
+            self.risk.peak_equity = usd_bal
+
+            if btc_bal > 0:
+                self._live_balance_deferred = True
+
+            try:
+                self._kraken.cancel_all()
+                logger.info("Cancelled any leftover orders on startup")
+            except Exception:
+                pass
 
             logger.info(
                 f"LIVE MODE initialized | USD=${usd_bal:,.2f} BTC={btc_bal:.8f}"
