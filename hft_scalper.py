@@ -167,6 +167,8 @@ class ScalperConfig:
     ema_window: int = 50
     momentum_filter_enabled: bool = True
     live_mode: bool = False
+    maker_fee_bps: float = 16.0
+    min_profit_bps: float = 2.0
 
 
 class RiskManager:
@@ -186,6 +188,7 @@ class RiskManager:
         self.is_stopped: bool = False
         self.avg_entry_price: float = 0.0
         self._trip_cost: float = 0.0
+        self.fees_paid: float = 0.0
 
     def unrealized_pnl(self, mid_price: float) -> float:
         if self.position == 0 or self.avg_entry_price == 0:
@@ -236,6 +239,11 @@ class RiskManager:
     def record_fill(self, side: OrderSide, price: float, qty: float):
         old_pos = self.position
         cost = price * qty
+        fee = cost * self.config.maker_fee_bps / 10_000
+        self.fees_paid += fee
+        self.balance -= fee
+        self.pnl -= fee
+        self._trip_cost -= fee
 
         if side == OrderSide.BUY:
             self.balance -= cost
@@ -286,19 +294,20 @@ class RiskManager:
             self.avg_entry_price = 0.0
 
         logger.info(
-            f"Fill: {side.value} {qty}@{price:.2f} | "
+            f"Fill: {side.value} {qty}@{price:.2f} fee=${fee:.4f} | "
             f"bal=${self.balance:.2f} pos={self.position:.6f} "
-            f"pnl={self.pnl:.4f} trades={self.trade_count} "
+            f"pnl={self.pnl:.4f} fees_total=${self.fees_paid:.4f} trades={self.trade_count} "
             f"avg_entry={self.avg_entry_price:.2f}"
         )
 
     def calculate_skewed_prices(self, tob: TopOfBook) -> tuple[float, float]:
         inventory_ratio = self.position / self.config.max_position if self.config.max_position > 0 else 0
         skew = inventory_ratio * self.config.skew_factor
-        half_spread = tob.spread / 2
         mid = tob.microprice
-        buy_price = round(mid - half_spread - skew * tob.spread, 2)
-        sell_price = round(mid + half_spread - skew * tob.spread, 2)
+        fee_offset = mid * (self.config.maker_fee_bps + self.config.min_profit_bps) / 10_000
+        half_spread = max(tob.spread / 2, fee_offset)
+        buy_price = round(mid - half_spread - skew * half_spread, 2)
+        sell_price = round(mid + half_spread - skew * half_spread, 2)
         return buy_price, sell_price
 
     def update_drawdown(self, mid_price: float):
@@ -655,13 +664,16 @@ class HFTScalper:
                 self._trade_history = self._trade_history[-50:]
             mode_tag = "LIVE" if self.config.live_mode else "PAPER"
             side_emoji = "🟢" if order.side == OrderSide.BUY else "🔴"
+            fee_est = order.price * order.quantity * self.config.maker_fee_bps / 10_000
             self.telegram.send_alert(
                 f"{side_emoji} <b>{mode_tag} Fill</b> | {self.config.symbol}\n"
-                f"{order.side.value.upper()} {order.quantity} @ ${order.price:,.2f}\n\n"
+                f"{order.side.value.upper()} {order.quantity} @ ${order.price:,.2f}\n"
+                f"Fee: ~${fee_est:,.4f}\n\n"
                 f"Position: {self.risk.position:.6f} BTC\n"
                 f"Avg Entry: ${self.risk.avg_entry_price:,.2f}\n"
                 f"Equity: ${self.risk.equity(mid):,.2f}\n"
                 f"Realized PnL: ${self.risk.pnl:,.4f}\n"
+                f"Total Fees: ${self.risk.fees_paid:,.4f}\n"
                 f"W/L: {self.risk.wins}/{self.risk.losses}"
             )
 
@@ -762,6 +774,7 @@ class HFTScalper:
                 f"Unrealized: ${upnl:,.4f}\n"
                 f"Return: {self.risk.return_pct(mid):.2f}%\n"
                 f"Trades: {self.risk.trade_count} | W/L: {self.risk.wins}/{self.risk.losses} ({self.risk.win_rate:.0f}%)\n"
+                f"Fees Paid: ${self.risk.fees_paid:,.4f}\n"
                 f"Max DD: {self.risk.max_drawdown_pct_seen:.2f}%\n"
                 f"{'─' * 20}\n"
                 f"Spread: {spread_bps:.2f} bps | Momentum: {momentum}"

@@ -25,11 +25,13 @@ config = ScalperConfig(
     rest_pair="XBTUSDC",
     starting_capital=16.0,
     order_qty=0.0001,
-    max_spread_bps=10.0,
-    stale_order_ms=500.0,
+    max_spread_bps=50.0,
+    stale_order_ms=5000.0,
     max_position=0.01,
     max_open_orders=2,
     live_mode=True,
+    maker_fee_bps=16.0,
+    min_profit_bps=2.0,
 )
 
 kraken = KrakenClient()
@@ -74,6 +76,7 @@ def api_status():
         "wins": scalper.risk.wins,
         "losses": scalper.risk.losses,
         "win_rate": round(scalper.risk.win_rate, 2),
+        "fees_paid": round(scalper.risk.fees_paid, 4),
         "max_drawdown_pct": round(scalper.risk.max_drawdown_pct_seen, 2),
         "is_stopped": scalper.risk.is_stopped,
         "open_orders": scalper.orders.open_count,

@@ -103,6 +103,10 @@ WildBot is a high-frequency trading (HFT) scalping bot that connects to Kraken v
 - `SESSION_SECRET` — Flask session secret
 
 ## Recent Changes
+- 2026-02-12: Fee-aware pricing: buy/sell prices offset by maker fee (16bps) + profit target (2bps) to ensure round trips are profitable after Kraken fees
+- 2026-02-12: Fee tracking in record_fill: deducts estimated maker fee from balance/pnl, tracks total fees_paid, includes fees in trip_cost for accurate win/loss
+- 2026-02-12: Increased stale_order_ms to 5000 (from 500) and max_spread_bps to 50 to accommodate wider fee-aware quotes
+- 2026-02-12: Enhanced Telegram messages: fill alerts with fee info, periodic updates with fees paid, LIVE/PAPER mode indicators, total PnL breakdown
 - 2026-02-12: Implemented live trading via Kraken REST API (AddOrder, CancelOrder, CancelAll, QueryOrders)
 - 2026-02-12: Created kraken_client.py with HMAC-SHA512 authentication and rate limiting
 - 2026-02-12: Added live_mode toggle with automatic fallback to paper on API failure
