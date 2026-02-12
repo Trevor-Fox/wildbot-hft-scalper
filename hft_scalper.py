@@ -61,8 +61,9 @@ class TopOfBook:
 
 @dataclass
 class ScalperConfig:
-    symbol: str = "BTC/USDT"
-    ws_url: str = "wss://stream.binance.com:9443/ws/btcusdt@depth5@100ms"
+    symbol: str = "BTC/USD"
+    ws_url: str = "wss://ws.kraken.com/v2"
+    ws_symbol: str = "BTC/USD"
     order_qty: float = 0.001
     max_spread_bps: float = 10.0
     stale_order_ms: float = 500.0
@@ -188,15 +189,25 @@ class HFTScalper:
     def _parse_depth_update(self, raw: str) -> bool:
         try:
             data = json.loads(raw)
-            bids = data.get("bids", [])
-            asks = data.get("asks", [])
-            if bids and asks:
-                self.tob.best_bid = float(bids[0][0])
-                self.tob.bid_qty = float(bids[0][1])
-                self.tob.best_ask = float(asks[0][0])
-                self.tob.ask_qty = float(asks[0][1])
-                self.tob.timestamp = time.time()
-                return True
+            channel = data.get("channel")
+            if channel == "ticker":
+                tick_data = data.get("data", [{}])[0]
+                bid = tick_data.get("bid")
+                ask = tick_data.get("ask")
+                bid_qty = tick_data.get("bid_qty")
+                ask_qty = tick_data.get("ask_qty")
+                if bid is not None and ask is not None:
+                    self.tob.best_bid = float(bid)
+                    self.tob.best_ask = float(ask)
+                    self.tob.bid_qty = float(bid_qty) if bid_qty else 0.0
+                    self.tob.ask_qty = float(ask_qty) if ask_qty else 0.0
+                    self.tob.timestamp = time.time()
+                    return True
+            elif channel == "heartbeat":
+                return False
+            elif data.get("method") == "subscribe" and data.get("success"):
+                logger.info(f"Subscribed to {data.get('result', {}).get('channel', 'unknown')}")
+                return False
         except (json.JSONDecodeError, KeyError, IndexError, ValueError) as exc:
             logger.warning(f"Parse error: {exc}")
         return False
@@ -260,7 +271,16 @@ class HFTScalper:
                     ping_timeout=10,
                     close_timeout=5,
                 ) as ws:
-                    logger.info("WebSocket connected — streaming order book")
+                    logger.info("WebSocket connected — subscribing to ticker")
+                    sub_msg = json.dumps({
+                        "method": "subscribe",
+                        "params": {
+                            "channel": "ticker",
+                            "symbol": [self.config.ws_symbol],
+                            "event_trigger": "bbo",
+                        },
+                    })
+                    await ws.send(sub_msg)
                     delay = self.config.reconnect_delay
                     async for msg in ws:
                         if not self._running:

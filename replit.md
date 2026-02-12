@@ -22,17 +22,26 @@ WildBot is a high-frequency trading (HFT) scalping bot that connects to cryptocu
 5. **Reconnect logic** — Exponential backoff on disconnection
 
 ### Configuration (in main.py)
-- `symbol` — Trading pair (default: BTC/USDT)
-- `ws_url` — WebSocket endpoint for order book stream
+- `symbol` — Trading pair (default: BTC/USD)
+- `ws_url` — WebSocket endpoint (default: Kraken v2)
+- `ws_symbol` — Exchange-specific symbol for subscription
 - `order_qty` — Order size per side
 - `max_spread_bps` — Maximum acceptable spread in basis points
 - `stale_order_ms` — Cancel orders older than this (default: 500ms)
 - `max_position` — Maximum net position allowed
 
+### Web Server
+- Flask serves a JSON status dashboard on `/` and health check on `/health`
+- Production deployment uses gunicorn
+- Scalper runs in a background thread alongside the web server
+
 ## Tech Stack
 - Python 3.11
 - websockets (async WebSocket client)
 - asyncio (concurrency)
+- Flask + gunicorn (web server / deployment)
 
 ## Recent Changes
+- 2026-02-12: Switched L1 data source from Binance to Kraken WebSocket v2 API (no IP restrictions)
+- 2026-02-12: Added Flask web server and gunicorn deployment config
 - 2026-02-12: Initial creation of HFT scalper module with WebSocket L1 monitoring, market making, and risk management

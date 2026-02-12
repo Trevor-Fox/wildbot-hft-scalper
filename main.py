@@ -10,8 +10,9 @@ from hft_scalper import HFTScalper, ScalperConfig
 app = Flask(__name__)
 
 config = ScalperConfig(
-    symbol="BTC/USDT",
-    ws_url="wss://stream.binance.com:9443/ws/btcusdt@depth5@100ms",
+    symbol="BTC/USD",
+    ws_url="wss://ws.kraken.com/v2",
+    ws_symbol="BTC/USD",
     order_qty=0.001,
     max_spread_bps=10.0,
     stale_order_ms=500.0,
