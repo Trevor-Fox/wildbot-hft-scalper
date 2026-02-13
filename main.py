@@ -8,7 +8,7 @@ import threading
 import time
 
 from flask import Flask, jsonify, render_template
-from hft_scalper import HFTScalper, ScalperConfig
+from hft_scalper import HFTScalper, ScalperConfig, PairScanner, SCAN_PAIRS
 from kraken_client import KrakenClient
 
 logging.getLogger("werkzeug").setLevel(logging.WARNING)
@@ -51,12 +51,18 @@ config = ScalperConfig(
     maker_fee_bps=16.0,
     min_profit_bps=4.0,
     min_volatility_bps=0.5,
-    max_hold_seconds=120.0,
+    max_hold_seconds=300.0,
     stop_loss_bps=20.0,
+    volatility_exit_multiplier=0.8,
+    min_hold_seconds=10.0,
+    base_hold_seconds=300.0,
+    max_hold_scaling=3.0,
 )
 
 kraken = KrakenClient()
-scalper = HFTScalper(config, kraken_client=kraken)
+scanner = PairScanner(SCAN_PAIRS)
+scanner._active_pair = config.ws_symbol
+scalper = HFTScalper(config, kraken_client=kraken, scanner=scanner)
 
 
 def run_scalper():
@@ -119,6 +125,10 @@ def api_status():
         "spread_bps": round((scalper.tob.spread / scalper.tob.mid_price * 10000) if scalper.tob.mid_price > 0 else 0, 2),
         "min_edge_bps": round(2 * config.maker_fee_bps + config.min_profit_bps, 2),
         "fee_bps": config.maker_fee_bps,
+        "scanner_data": scalper.scanner.get_scanner_data() if scalper.scanner else [],
+        "active_pair": scalper.config.ws_symbol,
+        "dynamic_exit_bps": round(scalper.risk.dynamic_exit_bps(scalper._volatility_bps), 2),
+        "dynamic_hold_seconds": round(scalper.risk.dynamic_hold_seconds(scalper.risk.dynamic_exit_bps(scalper._volatility_bps)), 1),
     })
 
 

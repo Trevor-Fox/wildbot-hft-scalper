@@ -281,6 +281,39 @@
   </div>
 </div>
 
+<div class="section-title">Pair Scanner</div>
+<div class="trade-table-wrap" style="margin-bottom:20px;">
+  <div style="display:flex;gap:20px;margin-bottom:12px;flex-wrap:wrap;">
+    <div class="info-item" style="flex:1;min-width:140px;">
+      <span class="info-label">Active Pair</span>
+      <span class="info-value mono green" id="activePair">—</span>
+    </div>
+    <div class="info-item" style="flex:1;min-width:140px;">
+      <span class="info-label">Dynamic Exit Target</span>
+      <span class="info-value mono yellow" id="dynExitBps">—</span>
+    </div>
+    <div class="info-item" style="flex:1;min-width:140px;">
+      <span class="info-label">Dynamic Hold Time</span>
+      <span class="info-value mono blue" id="dynHoldSec">—</span>
+    </div>
+  </div>
+  <table class="trade-table" id="scannerTable">
+    <thead>
+      <tr>
+        <th>Symbol</th>
+        <th>Price</th>
+        <th>Vol (bps)</th>
+        <th>Spread (bps)</th>
+        <th>Data Pts</th>
+        <th>Status</th>
+      </tr>
+    </thead>
+    <tbody id="scannerBody">
+      <tr><td colspan="6" class="empty-trades">Waiting for data...</td></tr>
+    </tbody>
+  </table>
+</div>
+
 <div class="section-title">Strategy Indicators</div>
 <div class="info-grid" style="margin-bottom:20px;">
   <div class="info-item">
@@ -454,6 +487,32 @@ function update() {
       document.getElementById('minEdgeBps').textContent = (d.min_edge_bps || 0).toFixed(2);
       document.getElementById('feeBps').textContent = (d.fee_bps || 0).toFixed(1);
       document.getElementById('volBps').textContent = (d.volatility_bps || 0).toFixed(2);
+
+      document.getElementById('activePair').textContent = d.active_pair || '—';
+      document.getElementById('dynExitBps').textContent = (d.dynamic_exit_bps || 0).toFixed(2) + ' bps';
+      document.getElementById('dynHoldSec').textContent = (d.dynamic_hold_seconds || 0).toFixed(0) + 's';
+
+      var scannerData = d.scanner_data || [];
+      var scanBody = document.getElementById('scannerBody');
+      if (scannerData.length === 0) {
+        scanBody.innerHTML = '<tr><td colspan="6" class="empty-trades">Waiting for data...</td></tr>';
+      } else {
+        scannerData.sort(function(a, b) { return b.volatility_bps - a.volatility_bps; });
+        var srows = '';
+        for (var si = 0; si < scannerData.length; si++) {
+          var sp = scannerData[si];
+          var rowStyle = sp.active ? ' style="background:#9ece6a15;"' : '';
+          srows += '<tr' + rowStyle + '>';
+          srows += '<td class="mono' + (sp.active ? ' green' : '') + '">' + sp.symbol + '</td>';
+          srows += '<td class="mono">' + (sp.mid_price > 0 ? '$' + sp.mid_price : '—') + '</td>';
+          srows += '<td class="mono' + (sp.volatility_bps > 5 ? ' yellow' : '') + '">' + sp.volatility_bps.toFixed(2) + '</td>';
+          srows += '<td class="mono">' + sp.spread_bps.toFixed(2) + '</td>';
+          srows += '<td class="mono">' + sp.data_points + '</td>';
+          srows += '<td>' + (sp.active ? '<span class="momentum-badge momentum-up">ACTIVE</span>' : '—') + '</td>';
+          srows += '</tr>';
+        }
+        scanBody.innerHTML = srows;
+      }
 
       var stEl = document.getElementById('stoppedStatus');
       if (d.is_stopped) {

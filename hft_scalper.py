@@ -98,6 +98,28 @@ class TelegramNotifier:
             logger.warning(f"Telegram error: {exc}")
 
 
+@dataclass
+class PairConfig:
+    ws_symbol: str
+    rest_pair: str
+    display_name: str
+    min_qty: float
+    price_decimals: int
+    qty_decimals: int
+
+
+SCAN_PAIRS = [
+    PairConfig("BTC/USDC", "XBTUSDC", "BTC", 0.0001, 1, 8),
+    PairConfig("ETH/USDC", "ETHUSDC", "ETH", 0.01, 2, 8),
+    PairConfig("SOL/USDC", "SOLUSDC", "SOL", 0.25, 4, 8),
+    PairConfig("DOGE/USDC", "DOGEUSDC", "DOGE", 50.0, 6, 2),
+    PairConfig("XRP/USDC", "XRPUSDC", "XRP", 10.0, 6, 2),
+    PairConfig("LINK/USDC", "LINKUSDC", "LINK", 0.2, 4, 8),
+    PairConfig("AVAX/USDC", "AVAXUSDC", "AVAX", 0.1, 4, 8),
+    PairConfig("ADA/USDC", "ADAUSDC", "ADA", 10.0, 6, 2),
+]
+
+
 class OrderSide(Enum):
     BUY = "buy"
     SELL = "sell"
@@ -147,6 +169,110 @@ class TopOfBook:
         return self.mid_price
 
 
+class PairScanner:
+    """Tracks volatility and spread across multiple pairs to find best trading opportunity."""
+
+    def __init__(self, pairs: list[PairConfig], volatility_window: int = 100):
+        self.pairs = {p.ws_symbol: p for p in pairs}
+        self.tobs: dict[str, TopOfBook] = {p.ws_symbol: TopOfBook() for p in pairs}
+        self._price_histories: dict[str, list[float]] = {p.ws_symbol: [] for p in pairs}
+        self._volatilities: dict[str, float] = {p.ws_symbol: 0.0 for p in pairs}
+        self._spreads_bps: dict[str, float] = {p.ws_symbol: 0.0 for p in pairs}
+        self._volatility_window = volatility_window
+        self._min_switch_interval = 60.0
+        self._last_switch_time = 0.0
+        self._active_pair: str = ""
+
+    def update(self, ws_symbol: str, bid: float, ask: float, bid_qty: float, ask_qty: float):
+        if ws_symbol not in self.tobs:
+            return
+        tob = self.tobs[ws_symbol]
+        tob.best_bid = bid
+        tob.best_ask = ask
+        tob.bid_qty = bid_qty
+        tob.ask_qty = ask_qty
+        tob.timestamp = time.time()
+
+        mid = tob.mid_price
+        if mid <= 0:
+            return
+
+        self._spreads_bps[ws_symbol] = (tob.spread / mid) * 10_000
+
+        history = self._price_histories[ws_symbol]
+        history.append(mid)
+        if len(history) > self._volatility_window:
+            self._price_histories[ws_symbol] = history[-self._volatility_window:]
+        if len(history) >= 20:
+            mean = sum(history) / len(history)
+            if mean > 0:
+                self._volatilities[ws_symbol] = (statistics.stdev(history) / mean) * 10_000
+
+    def get_best_pair(self, available_balance: float, maker_fee_bps: float, min_profit_bps: float) -> Optional[PairConfig]:
+        candidates = []
+        min_edge = 2 * maker_fee_bps + min_profit_bps
+
+        for ws_sym, pair_cfg in self.pairs.items():
+            tob = self.tobs[ws_sym]
+            vol = self._volatilities[ws_sym]
+            spread = self._spreads_bps[ws_sym]
+
+            if tob.mid_price <= 0:
+                continue
+
+            min_notional = pair_cfg.min_qty * tob.mid_price
+            if min_notional > available_balance * 0.95:
+                continue
+
+            if len(self._price_histories[ws_sym]) < 20:
+                continue
+
+            score = vol - spread * 0.1
+
+            candidates.append((ws_sym, pair_cfg, vol, spread, score))
+
+        if not candidates:
+            return None
+
+        candidates.sort(key=lambda x: x[4], reverse=True)
+        return candidates[0][1]
+
+    def should_switch(self, current_pair: str, best_pair: PairConfig) -> bool:
+        if best_pair.ws_symbol == current_pair:
+            return False
+
+        now = time.time()
+        if now - self._last_switch_time < self._min_switch_interval:
+            return False
+
+        current_vol = self._volatilities.get(current_pair, 0)
+        best_vol = self._volatilities.get(best_pair.ws_symbol, 0)
+
+        if current_vol > 0 and best_vol < current_vol * 1.5:
+            return False
+
+        return True
+
+    def record_switch(self):
+        self._last_switch_time = time.time()
+
+    def get_scanner_data(self) -> list[dict]:
+        result = []
+        for ws_sym in sorted(self.pairs.keys()):
+            pair_cfg = self.pairs[ws_sym]
+            tob = self.tobs[ws_sym]
+            result.append({
+                "symbol": pair_cfg.display_name,
+                "ws_symbol": ws_sym,
+                "mid_price": round(tob.mid_price, pair_cfg.price_decimals) if tob.mid_price > 0 else 0,
+                "spread_bps": round(self._spreads_bps.get(ws_sym, 0), 2),
+                "volatility_bps": round(self._volatilities.get(ws_sym, 0), 2),
+                "active": ws_sym == self._active_pair,
+                "data_points": len(self._price_histories.get(ws_sym, [])),
+            })
+        return result
+
+
 @dataclass
 class ScalperConfig:
     symbol: str = "BTC/USD"
@@ -175,6 +301,10 @@ class ScalperConfig:
     volatility_window: int = 100
     max_hold_seconds: float = 120.0
     stop_loss_bps: float = 20.0
+    volatility_exit_multiplier: float = 0.8
+    min_hold_seconds: float = 10.0
+    base_hold_seconds: float = 300.0
+    max_hold_scaling: float = 3.0
 
 
 class RiskManager:
@@ -312,15 +442,28 @@ class RiskManager:
             f"avg_entry={self.avg_entry_price:.2f}"
         )
 
-    def calculate_skewed_prices(self, tob: TopOfBook) -> tuple[float | None, float | None]:
+    def dynamic_exit_bps(self, volatility_bps: float) -> float:
+        min_edge = 2 * self.config.maker_fee_bps + self.config.min_profit_bps
+        vol_target = volatility_bps * self.config.volatility_exit_multiplier
+        return max(min_edge, vol_target)
+
+    def dynamic_hold_seconds(self, exit_bps: float) -> float:
+        min_edge = 2 * self.config.maker_fee_bps + self.config.min_profit_bps
+        ratio = exit_bps / min_edge if min_edge > 0 else 1.0
+        hold = self.config.base_hold_seconds * ratio
+        return max(self.config.min_hold_seconds, min(hold, self.config.base_hold_seconds * self.config.max_hold_scaling))
+
+    def calculate_skewed_prices(self, tob: TopOfBook, volatility_bps: float = 0.0) -> tuple[float | None, float | None]:
         mid = tob.microprice
 
         if self.position > self._dust_qty:
-            exit_offset = mid * (2 * self.config.maker_fee_bps + self.config.min_profit_bps) / 10_000
+            exit_bps = self.dynamic_exit_bps(volatility_bps)
+            exit_offset = mid * exit_bps / 10_000
             buy_price = None
             sell_price = round(max(self.avg_entry_price + exit_offset, tob.best_ask), 2)
         elif self.position < -self._dust_qty:
-            exit_offset = mid * (2 * self.config.maker_fee_bps + self.config.min_profit_bps) / 10_000
+            exit_bps = self.dynamic_exit_bps(volatility_bps)
+            exit_offset = mid * exit_bps / 10_000
             buy_price = round(min(self.avg_entry_price - exit_offset, tob.best_bid), 2)
             sell_price = None
         else:
@@ -574,13 +717,14 @@ class OrderManager:
 
 
 class HFTScalper:
-    def __init__(self, config: Optional[ScalperConfig] = None, kraken_client=None):
+    def __init__(self, config: Optional[ScalperConfig] = None, kraken_client=None, scanner: Optional[PairScanner] = None):
         self.config = config or ScalperConfig()
         self.tob = TopOfBook()
         self.risk = RiskManager(self.config)
         self._kraken = kraken_client
         self.orders = OrderManager(self.config, kraken_client=kraken_client)
         self.telegram = TelegramNotifier()
+        self.scanner = scanner
         self._running = False
         self._update_count = 0
         self._ema: float = 0.0
@@ -627,31 +771,76 @@ class HFTScalper:
             if mean > 0:
                 self._volatility_bps = (statistics.stdev(self._price_history) / mean) * 10_000
 
-    def _parse_depth_update(self, raw: str) -> bool:
+    def _switch_pair(self, new_pair: PairConfig):
+        if abs(self.risk.position) > self.risk._dust_qty:
+            logger.warning(f"Cannot switch pair while holding position: {self.risk.position}")
+            return False
+
+        old_symbol = self.config.symbol
+        self.config.symbol = new_pair.ws_symbol
+        self.config.ws_symbol = new_pair.ws_symbol
+        self.config.rest_pair = new_pair.rest_pair
+        self.config.order_qty = new_pair.min_qty
+        self.orders._rest_pair = new_pair.rest_pair
+
+        self._ema = 0.0
+        self._price_history.clear()
+        self._volatility_bps = 0.0
+
+        if self.scanner and new_pair.ws_symbol in self.scanner.tobs:
+            scanner_tob = self.scanner.tobs[new_pair.ws_symbol]
+            self.tob.best_bid = scanner_tob.best_bid
+            self.tob.best_ask = scanner_tob.best_ask
+            self.tob.bid_qty = scanner_tob.bid_qty
+            self.tob.ask_qty = scanner_tob.ask_qty
+
+        self.scanner._active_pair = new_pair.ws_symbol
+        self.scanner.record_switch()
+
+        logger.info(f"SWITCHED PAIR: {old_symbol} → {new_pair.ws_symbol} | qty={new_pair.min_qty}")
+        self.telegram.send_alert(
+            f"🔄 <b>Pair Switch</b>\n"
+            f"{old_symbol} → {new_pair.ws_symbol}\n"
+            f"Order Size: {new_pair.min_qty}"
+        )
+        return True
+
+    def _parse_depth_update(self, raw: str) -> tuple[bool, str]:
         try:
             data = json.loads(raw)
             channel = data.get("channel")
             if channel == "ticker":
                 tick_data = data.get("data", [{}])[0]
+                symbol = tick_data.get("symbol", "")
                 bid = tick_data.get("bid")
                 ask = tick_data.get("ask")
                 bid_qty = tick_data.get("bid_qty")
                 ask_qty = tick_data.get("ask_qty")
                 if bid is not None and ask is not None:
-                    self.tob.best_bid = float(bid)
-                    self.tob.best_ask = float(ask)
-                    self.tob.bid_qty = float(bid_qty) if bid_qty else 0.0
-                    self.tob.ask_qty = float(ask_qty) if ask_qty else 0.0
-                    self.tob.timestamp = time.time()
-                    return True
+                    bid_f = float(bid)
+                    ask_f = float(ask)
+                    bid_qty_f = float(bid_qty) if bid_qty else 0.0
+                    ask_qty_f = float(ask_qty) if ask_qty else 0.0
+
+                    if self.scanner:
+                        self.scanner.update(symbol, bid_f, ask_f, bid_qty_f, ask_qty_f)
+
+                    if symbol == self.config.ws_symbol:
+                        self.tob.best_bid = bid_f
+                        self.tob.best_ask = ask_f
+                        self.tob.bid_qty = bid_qty_f
+                        self.tob.ask_qty = ask_qty_f
+                        self.tob.timestamp = time.time()
+                        return True, symbol
+                    return False, symbol
             elif channel == "heartbeat":
-                return False
+                return False, ""
             elif data.get("method") == "subscribe" and data.get("success"):
                 logger.info(f"Subscribed to {data.get('result', {}).get('channel', 'unknown')}")
-                return False
+                return False, ""
         except (json.JSONDecodeError, KeyError, IndexError, ValueError) as exc:
             logger.warning(f"Parse error: {exc}")
-        return False
+        return False, ""
 
     async def _handle_tick(self):
         self._update_count += 1
@@ -744,7 +933,8 @@ class HFTScalper:
 
         if abs(self.risk.position) > self.risk._dust_qty and self.risk._position_entry_time > 0:
             hold_time = time.monotonic() - self.risk._position_entry_time
-            if hold_time > self.config.max_hold_seconds and not self.orders.has_side(
+            dynamic_hold = self.risk.dynamic_hold_seconds(self.risk.dynamic_exit_bps(self._volatility_bps))
+            if hold_time > dynamic_hold and not self.orders.has_side(
                 OrderSide.SELL if self.risk.position > 0 else OrderSide.BUY
             ):
                 self.orders.cancel_all()
@@ -757,7 +947,7 @@ class HFTScalper:
                     self.orders.create_order(OrderSide.BUY, exit_price, abs(self.risk.position))
                 if exit_price is not None:
                     self._status_reason = "time_stop"
-                    logger.warning(f"TIME STOP: Position held {hold_time:.0f}s > max {self.config.max_hold_seconds:.0f}s — force exit at {exit_price:.2f}")
+                    logger.warning(f"TIME STOP: Position held {hold_time:.0f}s > max {dynamic_hold:.0f}s — force exit at {exit_price:.2f}")
                     self.telegram.send_alert(f"⏰ <b>TIME STOP</b>\nForce exit after {hold_time:.0f}s\nPrice: ${exit_price:,.2f}")
                 return
 
@@ -784,7 +974,17 @@ class HFTScalper:
                     self.telegram.send_alert(f"🛑 <b>STOP LOSS</b>\nAdverse move {adverse_bps:.1f}bps\nForce exit at ${exit_price:,.2f}")
                 return
 
-        buy_price, sell_price = self.risk.calculate_skewed_prices(self.tob)
+        if self.scanner and self._update_count % 100 == 0 and abs(self.risk.position) < self.risk._dust_qty:
+            best = self.scanner.get_best_pair(
+                self.risk.balance,
+                self.config.maker_fee_bps,
+                self.config.min_profit_bps
+            )
+            if best and self.scanner.should_switch(self.config.ws_symbol, best):
+                self.orders.cancel_all()
+                self._switch_pair(best)
+
+        buy_price, sell_price = self.risk.calculate_skewed_prices(self.tob, self._volatility_bps)
         momentum = self.momentum_signal
 
         requote_thresh = self.tob.mid_price * self.config.requote_threshold_bps / 10_000
@@ -924,11 +1124,14 @@ class HFTScalper:
                         f"✅ <b>WildBot Reconnected</b>\n"
                         f"WebSocket connected to {self.config.ws_url}"
                     )
+                    all_symbols = [self.config.ws_symbol]
+                    if self.scanner:
+                        all_symbols = list(self.scanner.pairs.keys())
                     sub_msg = json.dumps({
                         "method": "subscribe",
                         "params": {
                             "channel": "ticker",
-                            "symbol": [self.config.ws_symbol],
+                            "symbol": all_symbols,
                             "event_trigger": "bbo",
                         },
                     })
@@ -937,7 +1140,8 @@ class HFTScalper:
                     async for msg in ws:
                         if not self._running:
                             break
-                        if self._parse_depth_update(msg):
+                        is_update, symbol = self._parse_depth_update(msg)
+                        if is_update:
                             await self._handle_tick()
             except websockets.exceptions.ConnectionClosed as exc:
                 logger.warning(f"Connection closed: {exc}")
