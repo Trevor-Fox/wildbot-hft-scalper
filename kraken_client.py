@@ -94,7 +94,7 @@ class KrakenClient:
         balances = self.get_balance()
         return balances.get("XXBT", 0.0)
 
-    def add_order(self, pair: str, side: str, order_type: str, volume: str, price: str = None) -> str:
+    def add_order(self, pair: str, side: str, order_type: str, volume: str, price: str = None, oflags: str = "post") -> str:
         data = {
             "pair": pair,
             "type": side,
@@ -103,6 +103,7 @@ class KrakenClient:
         }
         if price is not None:
             data["price"] = price
+        data["oflags"] = oflags
 
         try:
             result = self._private_request("AddOrder", data)

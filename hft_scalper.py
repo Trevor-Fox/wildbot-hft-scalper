@@ -326,10 +326,8 @@ class RiskManager:
         else:
             inventory_ratio = self.position / self.config.max_position if self.config.max_position > 0 else 0
             skew = inventory_ratio * self.config.skew_factor
-            entry_offset = mid * (self.config.maker_fee_bps + self.config.min_profit_bps) / 10_000
-            half_spread = max(tob.spread / 2, entry_offset)
-            buy_price = round(mid - half_spread - skew * half_spread, 2)
-            sell_price = round(mid + half_spread - skew * half_spread, 2)
+            buy_price = round(tob.best_bid - skew * tob.spread, 2)
+            sell_price = round(tob.best_ask - skew * tob.spread, 2)
 
         return buy_price, sell_price
 
@@ -596,6 +594,7 @@ class HFTScalper:
         self._balance_refresh_interval: float = 300.0
         self._last_balance_refresh: float = 0.0
         self._live_balance_deferred: bool = False
+        self._status_reason: str = "initializing"
 
     @property
     def momentum_signal(self) -> str:
@@ -722,6 +721,7 @@ class HFTScalper:
         self.risk.update_drawdown(self.tob.mid_price)
 
         if self.risk.is_stopped:
+            self._status_reason = "drawdown_stopped"
             self.orders.cancel_all()
             if not self._drawdown_alerted:
                 self._drawdown_alerted = True
@@ -736,6 +736,7 @@ class HFTScalper:
             return
 
         if not self.risk.is_spread_acceptable(self.tob):
+            self._status_reason = "spread_wide"
             if self.orders.open_count > 0:
                 self.orders.cancel_all()
                 logger.debug("Spread too wide — cancelled all orders")
@@ -755,6 +756,7 @@ class HFTScalper:
                     exit_price = self.tob.best_ask
                     self.orders.create_order(OrderSide.BUY, exit_price, abs(self.risk.position))
                 if exit_price is not None:
+                    self._status_reason = "time_stop"
                     logger.warning(f"TIME STOP: Position held {hold_time:.0f}s > max {self.config.max_hold_seconds:.0f}s — force exit at {exit_price:.2f}")
                     self.telegram.send_alert(f"⏰ <b>TIME STOP</b>\nForce exit after {hold_time:.0f}s\nPrice: ${exit_price:,.2f}")
                 return
@@ -777,6 +779,7 @@ class HFTScalper:
                     exit_price = self.tob.best_ask
                     self.orders.create_order(OrderSide.BUY, exit_price, abs(self.risk.position))
                 if exit_price is not None:
+                    self._status_reason = "stop_loss"
                     logger.warning(f"STOP LOSS: Adverse move {adverse_bps:.1f}bps > max {self.config.stop_loss_bps:.1f}bps — force exit at {exit_price:.2f}")
                     self.telegram.send_alert(f"🛑 <b>STOP LOSS</b>\nAdverse move {adverse_bps:.1f}bps\nForce exit at ${exit_price:,.2f}")
                 return
@@ -806,7 +809,17 @@ class HFTScalper:
                 place_buy = False
 
         if abs(self.risk.position) < self.risk._dust_qty and self._volatility_bps < self.config.min_volatility_bps:
+            self._status_reason = "volatility_low"
             return
+
+        spread_bps = (self.tob.spread / self.tob.mid_price) * 10_000 if self.tob.mid_price > 0 else 0
+        min_edge_bps = 2 * self.config.maker_fee_bps + self.config.min_profit_bps
+        if abs(self.risk.position) < self.risk._dust_qty and spread_bps < min_edge_bps:
+            self._status_reason = "active"
+        elif self.orders.open_count > 0:
+            self._status_reason = "waiting_fill"
+        else:
+            self._status_reason = "active"
 
         if (
             place_buy

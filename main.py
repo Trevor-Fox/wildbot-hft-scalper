@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import os
 import signal
 import socket
@@ -9,6 +10,8 @@ import time
 from flask import Flask, jsonify, render_template
 from hft_scalper import HFTScalper, ScalperConfig
 from kraken_client import KrakenClient
+
+logging.getLogger("werkzeug").setLevel(logging.WARNING)
 
 port = int(os.environ.get("PORT", 5000))
 for attempt in range(5):
@@ -47,7 +50,7 @@ config = ScalperConfig(
     live_mode=True,
     maker_fee_bps=16.0,
     min_profit_bps=4.0,
-    min_volatility_bps=3.0,
+    min_volatility_bps=0.5,
     max_hold_seconds=120.0,
     stop_loss_bps=20.0,
 )
@@ -112,6 +115,10 @@ def api_status():
         "trade_history": scalper._trade_history[-20:],
         "updates_processed": scalper._update_count,
         "uptime": round(time.time() - start_time, 1),
+        "status_reason": scalper._status_reason,
+        "spread_bps": round((scalper.tob.spread / scalper.tob.mid_price * 10000) if scalper.tob.mid_price > 0 else 0, 2),
+        "min_edge_bps": round(2 * config.maker_fee_bps + config.min_profit_bps, 2),
+        "fee_bps": config.maker_fee_bps,
     })
 
 

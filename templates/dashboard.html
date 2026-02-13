@@ -89,6 +89,39 @@
   }
   .info-label { font-size: 0.68rem; text-transform: uppercase; color: #565f89; letter-spacing: 0.04em; }
   .info-value { font-size: 0.95rem; font-weight: 500; }
+  .status-reason-bar {
+    background: #24283b;
+    border-radius: 10px;
+    padding: 16px;
+    margin-bottom: 20px;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    flex-wrap: wrap;
+  }
+  .status-reason-badge {
+    display: inline-block;
+    padding: 6px 16px;
+    border-radius: 6px;
+    font-size: 0.9rem;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+  }
+  .reason-active { background: #9ece6a22; color: #9ece6a; border: 1px solid #9ece6a55; }
+  .reason-waiting_fill { background: #7aa2f722; color: #7aa2f7; border: 1px solid #7aa2f755; }
+  .reason-volatility_low { background: #e0af6822; color: #e0af68; border: 1px solid #e0af6855; }
+  .reason-spread_wide { background: #e0af6822; color: #e0af68; border: 1px solid #e0af6855; }
+  .reason-drawdown_stopped { background: #f7768e22; color: #f7768e; border: 1px solid #f7768e55; }
+  .reason-cooldown { background: #bb9af722; color: #bb9af7; border: 1px solid #bb9af755; }
+  .reason-time_stop { background: #f7768e22; color: #f7768e; border: 1px solid #f7768e55; }
+  .reason-stop_loss { background: #f7768e22; color: #f7768e; border: 1px solid #f7768e55; }
+  .reason-initializing { background: #565f8922; color: #565f89; border: 1px solid #565f8955; }
+  .spread-info {
+    font-size: 0.82rem;
+    color: #c0caf5;
+  }
+  .spread-info span { margin-right: 16px; }
   .stopped-badge {
     display: inline-block;
     background: #f7768e22;
@@ -159,6 +192,16 @@
   <span class="status-label" id="statusLabel">connecting...</span>
   <span class="mode-badge" id="modeBadge">—</span>
 </header>
+
+<div class="status-reason-bar" id="statusReasonBar">
+  <span class="status-reason-badge reason-initializing" id="statusReasonBadge">INITIALIZING</span>
+  <div class="spread-info">
+    <span>Spread: <strong class="mono" id="spreadBps">—</strong> bps</span>
+    <span>Min Edge: <strong class="mono" id="minEdgeBps">—</strong> bps</span>
+    <span>Fee: <strong class="mono" id="feeBps">—</strong> bps/side</span>
+    <span>Volatility: <strong class="mono" id="volBps">—</strong> bps</span>
+  </div>
+</div>
 
 <div class="grid grid-4">
   <div class="card">
@@ -392,6 +435,26 @@ function update() {
       document.getElementById('updates').textContent = d.updates_processed.toLocaleString();
       document.getElementById('startingCapital').textContent = '$' + d.starting_capital.toFixed(2);
 
+      var reasonBadge = document.getElementById('statusReasonBadge');
+      var reason = d.status_reason || 'initializing';
+      var reasonLabels = {
+        'active': 'ACTIVE',
+        'waiting_fill': 'WAITING FOR FILL',
+        'volatility_low': 'LOW VOLATILITY',
+        'spread_wide': 'SPREAD TOO WIDE',
+        'drawdown_stopped': 'DRAWDOWN STOPPED',
+        'cooldown': 'FILL COOLDOWN',
+        'time_stop': 'TIME STOP',
+        'stop_loss': 'STOP LOSS',
+        'initializing': 'INITIALIZING'
+      };
+      reasonBadge.textContent = reasonLabels[reason] || reason.toUpperCase();
+      reasonBadge.className = 'status-reason-badge reason-' + reason;
+      document.getElementById('spreadBps').textContent = (d.spread_bps || 0).toFixed(2);
+      document.getElementById('minEdgeBps').textContent = (d.min_edge_bps || 0).toFixed(2);
+      document.getElementById('feeBps').textContent = (d.fee_bps || 0).toFixed(1);
+      document.getElementById('volBps').textContent = (d.volatility_bps || 0).toFixed(2);
+
       var stEl = document.getElementById('stoppedStatus');
       if (d.is_stopped) {
         stEl.innerHTML = '<span class="stopped-badge">STOPPED — Drawdown</span>';
@@ -428,7 +491,7 @@ function update() {
 }
 
 update();
-setInterval(update, 2000);
+setInterval(update, 5000);
 </script>
 </body>
 </html>
