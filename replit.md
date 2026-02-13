@@ -103,9 +103,17 @@ WildBot is a high-frequency trading (HFT) scalping bot that connects to Kraken v
 - `SESSION_SECRET` — Flask session secret
 
 ## Recent Changes
+- 2026-02-13: Major pricing overhaul: orders now placed at BBO (best bid/ask) instead of 20bps away. Previous 20bps entry offset placed orders $137 from market — virtually unfillable. Now joins the spread for realistic fills.
+- 2026-02-13: Added post_only flag (oflags=post) to all Kraken orders — guarantees maker fee and prevents accidental taker fills
+- 2026-02-13: Lowered volatility gate from 3bps to 0.5bps — observed vol is typically 0.02-0.7bps, previous gate blocked all trading
+- 2026-02-13: Added status reason tracking — bot reports WHY it's not trading (volatility_low, spread_wide, drawdown_stopped, etc.)
+- 2026-02-13: Dashboard now shows status reason bar with color coding, spread analysis (current vs min edge), fee info per side
+- 2026-02-13: Suppressed werkzeug access logs (set to WARNING) — eliminated 1-per-second log spam from dashboard polling
+- 2026-02-13: Reduced dashboard poll frequency from 2s to 5s
+- 2026-02-13: Added spread_bps, min_edge_bps, fee_bps, status_reason to /api/status endpoint
 - 2026-02-13: Fixed BTC dust threshold: raised from 1e-12 to order_qty/10 (0.00001 BTC) to prevent Kraken "Insufficient funds" errors from residual dust. Added _dust_qty property, filtered dust at source in balance initialization
 - 2026-02-13: Lowered volatility gate from 20bps to 3bps — 20bps was unrealistic for 100-tick (~10s) rolling window
-- 2026-02-13: Added volatility gate: bot only enters new positions when rolling price volatility > 3bps, preventing entries in dead markets where exits can't fill
+- 2026-02-13: Added volatility gate: bot only enters new positions when rolling price volatility > 0.5bps, preventing entries in dead markets
 - 2026-02-13: Widened entry offset from 2bps to 20bps (maker_fee + profit) so exit target is only 16bps further instead of 34bps
 - 2026-02-13: Added time-based stop-loss: force-exits positions held > 120s without reaching target
 - 2026-02-13: Added price stop-loss: force-exits when adverse move > 20bps to limit downside
