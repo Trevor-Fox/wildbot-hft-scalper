@@ -301,20 +301,20 @@ class RiskManager:
             f"avg_entry={self.avg_entry_price:.2f}"
         )
 
-    def calculate_skewed_prices(self, tob: TopOfBook) -> tuple[float, float]:
-        inventory_ratio = self.position / self.config.max_position if self.config.max_position > 0 else 0
-        skew = inventory_ratio * self.config.skew_factor
+    def calculate_skewed_prices(self, tob: TopOfBook) -> tuple[float | None, float | None]:
         mid = tob.microprice
 
         if self.position > 1e-12:
-            exit_offset = mid * (self.config.maker_fee_bps + self.config.min_profit_bps) / 10_000
-            buy_price = round(tob.best_bid - self.config.tick_size, 2)
+            exit_offset = mid * (2 * self.config.maker_fee_bps + self.config.min_profit_bps) / 10_000
+            buy_price = None
             sell_price = round(max(self.avg_entry_price + exit_offset, tob.best_ask), 2)
         elif self.position < -1e-12:
-            exit_offset = mid * (self.config.maker_fee_bps + self.config.min_profit_bps) / 10_000
+            exit_offset = mid * (2 * self.config.maker_fee_bps + self.config.min_profit_bps) / 10_000
             buy_price = round(min(self.avg_entry_price - exit_offset, tob.best_bid), 2)
-            sell_price = round(tob.best_ask + self.config.tick_size, 2)
+            sell_price = None
         else:
+            inventory_ratio = self.position / self.config.max_position if self.config.max_position > 0 else 0
+            skew = inventory_ratio * self.config.skew_factor
             entry_offset = mid * 2.0 / 10_000
             half_spread = max(tob.spread / 2, entry_offset)
             buy_price = round(mid - half_spread - skew * half_spread, 2)
@@ -726,13 +726,17 @@ class HFTScalper:
         for oid, order in list(self.orders.open_orders.items()):
             if order.status != OrderStatus.OPEN:
                 continue
-            drift = abs(order.price - (buy_price if order.side == OrderSide.BUY else sell_price))
+            target = buy_price if order.side == OrderSide.BUY else sell_price
+            if target is None:
+                self.orders.cancel_order(oid)
+                continue
+            drift = abs(order.price - target)
             age_ms = (time.monotonic() - order.placed_at) * 1000
             if drift > requote_thresh and age_ms > self.config.stale_order_ms:
                 self.orders.cancel_order(oid)
 
-        place_buy = True
-        place_sell = True
+        place_buy = buy_price is not None
+        place_sell = sell_price is not None
         if self.config.momentum_filter_enabled and abs(self.risk.position) < 1e-12:
             if momentum == "up":
                 place_sell = False
