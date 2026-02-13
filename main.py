@@ -47,6 +47,9 @@ config = ScalperConfig(
     live_mode=True,
     maker_fee_bps=16.0,
     min_profit_bps=4.0,
+    min_volatility_bps=20.0,
+    max_hold_seconds=120.0,
+    stop_loss_bps=20.0,
 )
 
 kraken = KrakenClient()
@@ -104,6 +107,7 @@ def api_status():
             "microprice": scalper.tob.microprice,
         },
         "ema": round(scalper._ema, 2),
+        "volatility_bps": round(scalper._volatility_bps, 2),
         "momentum": scalper.momentum_signal,
         "trade_history": scalper._trade_history[-20:],
         "updates_processed": scalper._update_count,

@@ -103,6 +103,10 @@ WildBot is a high-frequency trading (HFT) scalping bot that connects to Kraken v
 - `SESSION_SECRET` — Flask session secret
 
 ## Recent Changes
+- 2026-02-13: Added volatility gate: bot only enters new positions when rolling price volatility > 20bps, preventing entries in dead markets where exits can't fill
+- 2026-02-13: Widened entry offset from 2bps to 20bps (maker_fee + profit) so exit target is only 16bps further instead of 34bps
+- 2026-02-13: Added time-based stop-loss: force-exits positions held > 120s without reaching target
+- 2026-02-13: Added price stop-loss: force-exits when adverse move > 20bps to limit downside
 - 2026-02-13: Fixed exit offset to cover BOTH sides' maker fees: 2×16bps + 4bps profit = 36bps (~$239 on BTC). Previous 20bps offset only covered one side, causing guaranteed losses per round trip
 - 2026-02-13: Fixed position churn: when long, only sell orders are placed (no buys); when short, only buy orders. Prevents the bot from adding to positions while trying to exit, which was generating massive fee losses
 - 2026-02-12: Tightened exit offset from 2x maker fee (33bps/$216) to 1x maker fee + profit (20bps/$131) for faster trade completion

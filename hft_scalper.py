@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import statistics
 import time
 import logging
 import threading
@@ -170,6 +171,10 @@ class ScalperConfig:
     maker_fee_bps: float = 16.0
     min_profit_bps: float = 2.0
     requote_threshold_bps: float = 5.0
+    min_volatility_bps: float = 20.0
+    volatility_window: int = 100
+    max_hold_seconds: float = 120.0
+    stop_loss_bps: float = 20.0
 
 
 class RiskManager:
@@ -190,6 +195,7 @@ class RiskManager:
         self.avg_entry_price: float = 0.0
         self._trip_cost: float = 0.0
         self.fees_paid: float = 0.0
+        self._position_entry_time: float = 0.0
 
     def unrealized_pnl(self, mid_price: float) -> float:
         if self.position == 0 or self.avg_entry_price == 0:
@@ -239,6 +245,7 @@ class RiskManager:
 
     def record_fill(self, side: OrderSide, price: float, qty: float):
         old_pos = self.position
+        was_flat = abs(old_pos) < 1e-12
         cost = price * qty
         fee = cost * self.config.maker_fee_bps / 10_000
         self.fees_paid += fee
@@ -293,6 +300,9 @@ class RiskManager:
             self.position = 0.0
             self._close_trip()
             self.avg_entry_price = 0.0
+            self._position_entry_time = 0.0
+        elif was_flat:
+            self._position_entry_time = time.monotonic()
 
         logger.info(
             f"Fill: {side.value} {qty}@{price:.2f} fee=${fee:.4f} | "
@@ -315,7 +325,7 @@ class RiskManager:
         else:
             inventory_ratio = self.position / self.config.max_position if self.config.max_position > 0 else 0
             skew = inventory_ratio * self.config.skew_factor
-            entry_offset = mid * 2.0 / 10_000
+            entry_offset = mid * (self.config.maker_fee_bps + self.config.min_profit_bps) / 10_000
             half_spread = max(tob.spread / 2, entry_offset)
             buy_price = round(mid - half_spread - skew * half_spread, 2)
             sell_price = round(mid + half_spread - skew * half_spread, 2)
@@ -577,6 +587,8 @@ class HFTScalper:
         self._ema: float = 0.0
         self._ema_alpha: float = 2.0 / (self.config.ema_window + 1)
         self._trade_history: list[dict] = []
+        self._price_history: list[float] = []
+        self._volatility_bps: float = 0.0
         self._drawdown_alerted: bool = False
         self._live_fill_poll_interval: float = 5.0
         self._last_live_fill_poll: float = 0.0
@@ -606,6 +618,14 @@ class HFTScalper:
             self._ema = mid
         else:
             self._ema = self._ema_alpha * mid + (1 - self._ema_alpha) * self._ema
+
+        self._price_history.append(mid)
+        if len(self._price_history) > self.config.volatility_window:
+            self._price_history = self._price_history[-self.config.volatility_window:]
+        if len(self._price_history) >= 20:
+            mean = sum(self._price_history) / len(self._price_history)
+            if mean > 0:
+                self._volatility_bps = (statistics.stdev(self._price_history) / mean) * 10_000
 
     def _parse_depth_update(self, raw: str) -> bool:
         try:
@@ -645,6 +665,7 @@ class HFTScalper:
                 self.risk.starting_capital = total
                 self.risk.peak_equity = total
                 self.risk.avg_entry_price = self.tob.mid_price
+                self.risk._position_entry_time = time.monotonic()
                 logger.info(f"Deferred balance init: BTC value=${btc_value:,.2f} total=${total:,.2f}")
 
         if self.config.live_mode:
@@ -719,6 +740,46 @@ class HFTScalper:
                 logger.debug("Spread too wide — cancelled all orders")
             return
 
+        if abs(self.risk.position) > 1e-12 and self.risk._position_entry_time > 0:
+            hold_time = time.monotonic() - self.risk._position_entry_time
+            if hold_time > self.config.max_hold_seconds and not self.orders.has_side(
+                OrderSide.SELL if self.risk.position > 0 else OrderSide.BUY
+            ):
+                self.orders.cancel_all()
+                exit_price = None
+                if self.risk.position > 0:
+                    exit_price = self.tob.best_bid
+                    self.orders.create_order(OrderSide.SELL, exit_price, abs(self.risk.position))
+                elif self.risk.position < 0:
+                    exit_price = self.tob.best_ask
+                    self.orders.create_order(OrderSide.BUY, exit_price, abs(self.risk.position))
+                if exit_price is not None:
+                    logger.warning(f"TIME STOP: Position held {hold_time:.0f}s > max {self.config.max_hold_seconds:.0f}s — force exit at {exit_price:.2f}")
+                    self.telegram.send_alert(f"⏰ <b>TIME STOP</b>\nForce exit after {hold_time:.0f}s\nPrice: ${exit_price:,.2f}")
+                return
+
+        if abs(self.risk.position) > 1e-12 and self.risk.avg_entry_price > 0:
+            mid = self.tob.mid_price
+            if self.risk.position > 0:
+                adverse_bps = (self.risk.avg_entry_price - mid) / self.risk.avg_entry_price * 10_000
+            else:
+                adverse_bps = (mid - self.risk.avg_entry_price) / self.risk.avg_entry_price * 10_000
+            if adverse_bps > self.config.stop_loss_bps and not self.orders.has_side(
+                OrderSide.SELL if self.risk.position > 0 else OrderSide.BUY
+            ):
+                self.orders.cancel_all()
+                exit_price = None
+                if self.risk.position > 0:
+                    exit_price = self.tob.best_bid
+                    self.orders.create_order(OrderSide.SELL, exit_price, abs(self.risk.position))
+                elif self.risk.position < 0:
+                    exit_price = self.tob.best_ask
+                    self.orders.create_order(OrderSide.BUY, exit_price, abs(self.risk.position))
+                if exit_price is not None:
+                    logger.warning(f"STOP LOSS: Adverse move {adverse_bps:.1f}bps > max {self.config.stop_loss_bps:.1f}bps — force exit at {exit_price:.2f}")
+                    self.telegram.send_alert(f"🛑 <b>STOP LOSS</b>\nAdverse move {adverse_bps:.1f}bps\nForce exit at ${exit_price:,.2f}")
+                return
+
         buy_price, sell_price = self.risk.calculate_skewed_prices(self.tob)
         momentum = self.momentum_signal
 
@@ -742,6 +803,9 @@ class HFTScalper:
                 place_sell = False
             elif momentum == "down":
                 place_buy = False
+
+        if abs(self.risk.position) < 1e-12 and self._volatility_bps < self.config.min_volatility_bps:
+            return
 
         if (
             place_buy
@@ -783,7 +847,8 @@ class HFTScalper:
                 f"orders={self.orders.open_count} "
                 f"microprice={self.tob.microprice:.2f} "
                 f"ema={self._ema:.2f} momentum={momentum} "
-                f"avg_entry={self.risk.avg_entry_price:.2f}"
+                f"avg_entry={self.risk.avg_entry_price:.2f} "
+                f"vol={self._volatility_bps:.1f}bps"
             )
             mode_tag = "🔴 LIVE" if self.config.live_mode else "📝 PAPER"
             equity = self.risk.equity(mid)
