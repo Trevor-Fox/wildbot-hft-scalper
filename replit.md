@@ -1,18 +1,21 @@
 # WildBot HFT Scalper
 
 ## Overview
-WildBot is a high-frequency trading (HFT) scalping bot that connects to Kraken via WebSocket for real-time order book data. It implements market-making strategies with built-in risk management, multiple trading strategies (microprice, inventory skew, momentum filter), and comprehensive analytics. Supports both live trading on Kraken and paper trading modes with PnL updates sent to Telegram.
+WildBot is a high-frequency trading (HFT) scalping bot that connects to Kraken via WebSocket for real-time order book data. It implements market-making strategies with built-in risk management, multiple trading strategies (microprice, inventory skew, momentum filter), and comprehensive analytics. Features multi-pair volatility scanning across 8 USDC pairs (BTC, ETH, SOL, DOGE, XRP, LINK, AVAX, ADA), dynamically selecting the most volatile tradeable pair and adjusting exit targets based on observed market conditions. Supports both live trading on Kraken and paper trading modes with PnL updates sent to Telegram.
 
 ## Project Architecture
 
 ### Files
 - `main.py` — Entry point. Configures the scalper, Flask web server (HTML dashboard on `/`, JSON API on `/api/status`), and runs the async event loop in a background thread. Sets `live_mode=True` for real Kraken trading.
 - `hft_scalper.py` — Core HFT module containing:
-  - `HFTScalper` — Main orchestrator: WebSocket connection, tick processing, order lifecycle, Telegram notifications, EMA/momentum tracking, live balance initialization
+  - `HFTScalper` — Main orchestrator: WebSocket connection, tick processing, order lifecycle, Telegram notifications, EMA/momentum tracking, live balance initialization, pair switching
   - `TopOfBook` — L1 data structure (best bid/ask, quantities, spread, microprice)
-  - `RiskManager` — Position limits, spread filters, stale order detection (500ms timeout), affordability checks (live-aware), mark-to-market equity, 50% max drawdown stop, average cost tracking, round-trip PnL, inventory skew pricing
+  - `PairConfig` — Per-pair configuration (ws_symbol, rest_pair, display_name, min_qty, decimals)
+  - `PairScanner` — Multi-pair volatility tracker: scores pairs by vol minus spread penalty, 60s hysteresis, 1.5x switch threshold
+  - `SCAN_PAIRS` — 8 USDC pairs: BTC, ETH, SOL, DOGE, XRP, LINK, AVAX, ADA
+  - `RiskManager` — Position limits, spread filters, stale order detection, affordability checks (live-aware), mark-to-market equity, 50% max drawdown stop, average cost tracking, round-trip PnL, inventory skew pricing, dynamic exit/hold targeting
   - `OrderManager` — Dual-mode order management: paper (simulated fills) and live (Kraken REST API orders with exponential backoff on errors)
-  - `ScalperConfig` — All tunable parameters including `live_mode` and `rest_pair`
+  - `ScalperConfig` — All tunable parameters including `live_mode`, `rest_pair`, dynamic targeting config
   - `TelegramNotifier` — Rate-limited notifications, alerts, daily summaries
 - `kraken_client.py` — Kraken REST API client with HMAC-SHA512 authentication for AddOrder, CancelOrder, CancelAll, Balance, OpenOrders, QueryOrders. Includes 1s rate limiting between API calls.
 - `templates/dashboard.html` — Live-updating dark-themed trading dashboard with LIVE/PAPER mode indicator (auto-refreshes every 2s)
@@ -103,6 +106,12 @@ WildBot is a high-frequency trading (HFT) scalping bot that connects to Kraken v
 - `SESSION_SECRET` — Flask session secret
 
 ## Recent Changes
+- 2026-02-13: Multi-pair volatility scanner: WebSocket subscribes to 8 USDC pairs (BTC, ETH, SOL, DOGE, XRP, LINK, AVAX, ADA) simultaneously, tracks per-pair volatility/spread/liquidity
+- 2026-02-13: PairScanner class with intelligent pair selection: scores by vol minus spread penalty, 60s hysteresis, 1.5x switch threshold
+- 2026-02-13: Dynamic exit targets: exit_bps = max(min_edge, volatility * 0.8), allowing wider targets on volatile pairs
+- 2026-02-13: Dynamic hold times: scales from 10s to 900s based on exit distance
+- 2026-02-13: Dashboard pair scanner table showing all pairs ranked by volatility, active pair highlighted
+- 2026-02-13: Safe pair switching: only when flat, cancels orders, resets indicators, copies TOB from scanner
 - 2026-02-13: Major pricing overhaul: orders now placed at BBO (best bid/ask) instead of 20bps away. Previous 20bps entry offset placed orders $137 from market — virtually unfillable. Now joins the spread for realistic fills.
 - 2026-02-13: Added post_only flag (oflags=post) to all Kraken orders — guarantees maker fee and prevents accidental taker fills
 - 2026-02-13: Lowered volatility gate from 3bps to 0.5bps — observed vol is typically 0.02-0.7bps, previous gate blocked all trading
