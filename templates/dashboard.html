@@ -197,8 +197,8 @@
   <span class="status-reason-badge reason-initializing" id="statusReasonBadge">INITIALIZING</span>
   <div class="spread-info">
     <span>Spread: <strong class="mono" id="spreadBps">—</strong> bps</span>
-    <span>Min Edge: <strong class="mono" id="minEdgeBps">—</strong> bps</span>
-    <span>Fee: <strong class="mono" id="feeBps">—</strong> bps/side</span>
+    <span>Exit Target: <strong class="mono" id="minEdgeBps">—</strong> bps</span>
+    <span>Fee/RT: <strong class="mono" id="feeBps">—</strong> bps</span>
     <span>Volatility: <strong class="mono" id="volBps">—</strong> bps</span>
   </div>
 </div>
@@ -485,7 +485,7 @@ function update() {
       reasonBadge.className = 'status-reason-badge reason-' + reason;
       document.getElementById('spreadBps').textContent = (d.spread_bps || 0).toFixed(2);
       document.getElementById('minEdgeBps').textContent = (d.min_edge_bps || 0).toFixed(2);
-      document.getElementById('feeBps').textContent = (d.fee_bps || 0).toFixed(1);
+      document.getElementById('feeBps').textContent = (2 * (d.fee_bps || 0)).toFixed(1);
       document.getElementById('volBps').textContent = (d.volatility_bps || 0).toFixed(2);
 
       document.getElementById('activePair').textContent = d.active_pair || '—';

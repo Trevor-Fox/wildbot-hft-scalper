@@ -179,7 +179,7 @@ class PairScanner:
         self._volatilities: dict[str, float] = {p.ws_symbol: 0.0 for p in pairs}
         self._spreads_bps: dict[str, float] = {p.ws_symbol: 0.0 for p in pairs}
         self._volatility_window = volatility_window
-        self._min_switch_interval = 60.0
+        self._min_switch_interval = 20.0
         self._last_switch_time = 0.0
         self._active_pair: str = ""
 
@@ -248,7 +248,7 @@ class PairScanner:
         current_vol = self._volatilities.get(current_pair, 0)
         best_vol = self._volatilities.get(best_pair.ws_symbol, 0)
 
-        if current_vol > 0 and best_vol < current_vol * 1.5:
+        if current_vol > 0 and best_vol < current_vol * 1.2:
             return False
 
         return True
@@ -305,6 +305,7 @@ class ScalperConfig:
     min_hold_seconds: float = 10.0
     base_hold_seconds: float = 300.0
     max_hold_scaling: float = 3.0
+    target_exit_bps: float = 8.0
 
 
 class RiskManager:
@@ -443,13 +444,11 @@ class RiskManager:
         )
 
     def dynamic_exit_bps(self, volatility_bps: float) -> float:
-        min_edge = 2 * self.config.maker_fee_bps + self.config.min_profit_bps
         vol_target = volatility_bps * self.config.volatility_exit_multiplier
-        return max(min_edge, vol_target)
+        return max(self.config.target_exit_bps, vol_target)
 
     def dynamic_hold_seconds(self, exit_bps: float) -> float:
-        min_edge = 2 * self.config.maker_fee_bps + self.config.min_profit_bps
-        ratio = exit_bps / min_edge if min_edge > 0 else 1.0
+        ratio = exit_bps / self.config.target_exit_bps if self.config.target_exit_bps > 0 else 1.0
         hold = self.config.base_hold_seconds * ratio
         return max(self.config.min_hold_seconds, min(hold, self.config.base_hold_seconds * self.config.max_hold_scaling))
 
@@ -535,9 +534,9 @@ class OrderManager:
     def open_count(self) -> int:
         return len(self._open_orders)
 
-    def create_order(self, side: OrderSide, price: float, qty: float) -> Optional[Order]:
+    def create_order(self, side: OrderSide, price: float, qty: float, force_taker: bool = False) -> Optional[Order]:
         if self._live_mode and self._kraken:
-            return self._create_live_order(side, price, qty)
+            return self._create_live_order(side, price, qty, force_taker=force_taker)
         return self._create_paper_order(side, price, qty)
 
     def _create_paper_order(self, side: OrderSide, price: float, qty: float) -> Order:
@@ -555,17 +554,19 @@ class OrderManager:
         logger.info(f"Placed {side.value} order {oid}: {qty}@{price:.2f}")
         return order
 
-    def _create_live_order(self, side: OrderSide, price: float, qty: float) -> Optional[Order]:
+    def _create_live_order(self, side: OrderSide, price: float, qty: float, force_taker: bool = False) -> Optional[Order]:
         now = time.monotonic()
         if now - self._last_error_time < self._error_backoff:
             return None
         try:
+            oflags = "" if force_taker else "post"
             txid = self._kraken.add_order(
                 pair=self._rest_pair,
                 side=side.value,
                 order_type="limit",
                 volume=f"{qty:.8f}",
                 price=f"{price:.1f}",
+                oflags=oflags,
             )
             self._consecutive_errors = 0
             self._error_backoff = 2.0
@@ -940,11 +941,11 @@ class HFTScalper:
                 self.orders.cancel_all()
                 exit_price = None
                 if self.risk.position > 0:
-                    exit_price = self.tob.best_bid
-                    self.orders.create_order(OrderSide.SELL, exit_price, abs(self.risk.position))
+                    exit_price = round(self.tob.best_bid * 0.9999, 2)
+                    self.orders.create_order(OrderSide.SELL, exit_price, abs(self.risk.position), force_taker=True)
                 elif self.risk.position < 0:
-                    exit_price = self.tob.best_ask
-                    self.orders.create_order(OrderSide.BUY, exit_price, abs(self.risk.position))
+                    exit_price = round(self.tob.best_ask * 1.0001, 2)
+                    self.orders.create_order(OrderSide.BUY, exit_price, abs(self.risk.position), force_taker=True)
                 if exit_price is not None:
                     self._status_reason = "time_stop"
                     logger.warning(f"TIME STOP: Position held {hold_time:.0f}s > max {dynamic_hold:.0f}s — force exit at {exit_price:.2f}")
@@ -963,18 +964,18 @@ class HFTScalper:
                 self.orders.cancel_all()
                 exit_price = None
                 if self.risk.position > 0:
-                    exit_price = self.tob.best_bid
-                    self.orders.create_order(OrderSide.SELL, exit_price, abs(self.risk.position))
+                    exit_price = round(self.tob.best_bid * 0.9999, 2)
+                    self.orders.create_order(OrderSide.SELL, exit_price, abs(self.risk.position), force_taker=True)
                 elif self.risk.position < 0:
-                    exit_price = self.tob.best_ask
-                    self.orders.create_order(OrderSide.BUY, exit_price, abs(self.risk.position))
+                    exit_price = round(self.tob.best_ask * 1.0001, 2)
+                    self.orders.create_order(OrderSide.BUY, exit_price, abs(self.risk.position), force_taker=True)
                 if exit_price is not None:
                     self._status_reason = "stop_loss"
                     logger.warning(f"STOP LOSS: Adverse move {adverse_bps:.1f}bps > max {self.config.stop_loss_bps:.1f}bps — force exit at {exit_price:.2f}")
                     self.telegram.send_alert(f"🛑 <b>STOP LOSS</b>\nAdverse move {adverse_bps:.1f}bps\nForce exit at ${exit_price:,.2f}")
                 return
 
-        if self.scanner and self._update_count % 100 == 0 and abs(self.risk.position) < self.risk._dust_qty:
+        if self.scanner and self._update_count % 50 == 0 and abs(self.risk.position) < self.risk._dust_qty:
             best = self.scanner.get_best_pair(
                 self.risk.balance,
                 self.config.maker_fee_bps,
@@ -1012,9 +1013,7 @@ class HFTScalper:
             self._status_reason = "volatility_low"
             return
 
-        spread_bps = (self.tob.spread / self.tob.mid_price) * 10_000 if self.tob.mid_price > 0 else 0
-        min_edge_bps = 2 * self.config.maker_fee_bps + self.config.min_profit_bps
-        if abs(self.risk.position) < self.risk._dust_qty and spread_bps < min_edge_bps:
+        if abs(self.risk.position) < self.risk._dust_qty:
             self._status_reason = "active"
         elif self.orders.open_count > 0:
             self._status_reason = "waiting_fill"

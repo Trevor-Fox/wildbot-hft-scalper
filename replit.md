@@ -106,10 +106,15 @@ WildBot is a high-frequency trading (HFT) scalping bot that connects to Kraken v
 - `SESSION_SECRET` — Flask session secret
 
 ## Recent Changes
+- 2026-02-13: Strategy aggression overhaul: decoupled exit target from fee calculation with new target_exit_bps=8 (was 36bps min_edge). Exits now $55 away instead of $248
+- 2026-02-13: Force exits (time stop, stop loss) now use taker orders (no post_only) with 1bps through BBO for guaranteed fills
+- 2026-02-13: Aggressive timing: stale_order_ms 10s→2s, base_hold 300s→60s, fill_cooldown 200→100ms, stop_loss 20→12bps
+- 2026-02-13: Faster pair switching: 60s→20s cooldown, 1.5x→1.2x vol threshold, check every 50 ticks
+- 2026-02-13: Lowered volatility gate from 0.5bps to 0.1bps for more trading opportunities
 - 2026-02-13: Multi-pair volatility scanner: WebSocket subscribes to 8 USDC pairs (BTC, ETH, SOL, DOGE, XRP, LINK, AVAX, ADA) simultaneously, tracks per-pair volatility/spread/liquidity
-- 2026-02-13: PairScanner class with intelligent pair selection: scores by vol minus spread penalty, 60s hysteresis, 1.5x switch threshold
-- 2026-02-13: Dynamic exit targets: exit_bps = max(min_edge, volatility * 0.8), allowing wider targets on volatile pairs
-- 2026-02-13: Dynamic hold times: scales from 10s to 900s based on exit distance
+- 2026-02-13: PairScanner class with intelligent pair selection: scores by vol minus spread penalty, 20s hysteresis, 1.2x switch threshold
+- 2026-02-13: Dynamic exit targets: exit_bps = max(target_exit_bps, volatility * 0.8), allowing wider targets on volatile pairs
+- 2026-02-13: Dynamic hold times: scales from 5s to 120s based on exit distance
 - 2026-02-13: Dashboard pair scanner table showing all pairs ranked by volatility, active pair highlighted
 - 2026-02-13: Safe pair switching: only when flat, cancels orders, resets indicators, copies TOB from scanner
 - 2026-02-13: Major pricing overhaul: orders now placed at BBO (best bid/ask) instead of 20bps away. Previous 20bps entry offset placed orders $137 from market — virtually unfillable. Now joins the spread for realistic fills.

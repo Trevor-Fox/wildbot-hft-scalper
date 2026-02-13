@@ -103,7 +103,8 @@ class KrakenClient:
         }
         if price is not None:
             data["price"] = price
-        data["oflags"] = oflags
+        if oflags:
+            data["oflags"] = oflags
 
         try:
             result = self._private_request("AddOrder", data)
