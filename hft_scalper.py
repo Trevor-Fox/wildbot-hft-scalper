@@ -171,7 +171,7 @@ class ScalperConfig:
     maker_fee_bps: float = 16.0
     min_profit_bps: float = 2.0
     requote_threshold_bps: float = 5.0
-    min_volatility_bps: float = 20.0
+    min_volatility_bps: float = 3.0
     volatility_window: int = 100
     max_hold_seconds: float = 120.0
     stop_loss_bps: float = 20.0
@@ -196,6 +196,7 @@ class RiskManager:
         self._trip_cost: float = 0.0
         self.fees_paid: float = 0.0
         self._position_entry_time: float = 0.0
+        self._dust_qty: float = config.order_qty / 10
 
     def unrealized_pnl(self, mid_price: float) -> float:
         if self.position == 0 or self.avg_entry_price == 0:
@@ -224,7 +225,7 @@ class RiskManager:
 
     def can_place_sell(self) -> bool:
         position_ok = self.position - self.config.order_qty >= -self.config.max_position
-        if self.config.live_mode and self.position <= 0:
+        if self.config.live_mode and self.position < self._dust_qty:
             return False
         return position_ok
 
@@ -245,7 +246,7 @@ class RiskManager:
 
     def record_fill(self, side: OrderSide, price: float, qty: float):
         old_pos = self.position
-        was_flat = abs(old_pos) < 1e-12
+        was_flat = abs(old_pos) < self._dust_qty
         cost = price * qty
         fee = cost * self.config.maker_fee_bps / 10_000
         self.fees_paid += fee
@@ -296,7 +297,7 @@ class RiskManager:
 
         self.trade_count += 1
 
-        if abs(self.position) < 1e-12:
+        if abs(self.position) < self._dust_qty:
             self.position = 0.0
             self._close_trip()
             self.avg_entry_price = 0.0
@@ -314,11 +315,11 @@ class RiskManager:
     def calculate_skewed_prices(self, tob: TopOfBook) -> tuple[float | None, float | None]:
         mid = tob.microprice
 
-        if self.position > 1e-12:
+        if self.position > self._dust_qty:
             exit_offset = mid * (2 * self.config.maker_fee_bps + self.config.min_profit_bps) / 10_000
             buy_price = None
             sell_price = round(max(self.avg_entry_price + exit_offset, tob.best_ask), 2)
-        elif self.position < -1e-12:
+        elif self.position < -self._dust_qty:
             exit_offset = mid * (2 * self.config.maker_fee_bps + self.config.min_profit_bps) / 10_000
             buy_price = round(min(self.avg_entry_price - exit_offset, tob.best_bid), 2)
             sell_price = None
@@ -740,7 +741,7 @@ class HFTScalper:
                 logger.debug("Spread too wide — cancelled all orders")
             return
 
-        if abs(self.risk.position) > 1e-12 and self.risk._position_entry_time > 0:
+        if abs(self.risk.position) > self.risk._dust_qty and self.risk._position_entry_time > 0:
             hold_time = time.monotonic() - self.risk._position_entry_time
             if hold_time > self.config.max_hold_seconds and not self.orders.has_side(
                 OrderSide.SELL if self.risk.position > 0 else OrderSide.BUY
@@ -758,7 +759,7 @@ class HFTScalper:
                     self.telegram.send_alert(f"⏰ <b>TIME STOP</b>\nForce exit after {hold_time:.0f}s\nPrice: ${exit_price:,.2f}")
                 return
 
-        if abs(self.risk.position) > 1e-12 and self.risk.avg_entry_price > 0:
+        if abs(self.risk.position) > self.risk._dust_qty and self.risk.avg_entry_price > 0:
             mid = self.tob.mid_price
             if self.risk.position > 0:
                 adverse_bps = (self.risk.avg_entry_price - mid) / self.risk.avg_entry_price * 10_000
@@ -798,13 +799,13 @@ class HFTScalper:
 
         place_buy = buy_price is not None
         place_sell = sell_price is not None
-        if self.config.momentum_filter_enabled and abs(self.risk.position) < 1e-12:
+        if self.config.momentum_filter_enabled and abs(self.risk.position) < self.risk._dust_qty:
             if momentum == "up":
                 place_sell = False
             elif momentum == "down":
                 place_buy = False
 
-        if abs(self.risk.position) < 1e-12 and self._volatility_bps < self.config.min_volatility_bps:
+        if abs(self.risk.position) < self.risk._dust_qty and self._volatility_bps < self.config.min_volatility_bps:
             return
 
         if (
@@ -999,6 +1000,8 @@ class HFTScalper:
                     usd_bal += balances[key]
                     logger.info(f"Found USD balance in {key}: {balances[key]}")
             btc_bal = balances.get("XXBT", balances.get("XBT", 0.0))
+            if btc_bal < self.config.order_qty:
+                btc_bal = 0.0
 
             self.risk.balance = usd_bal
             self.risk.position = btc_bal

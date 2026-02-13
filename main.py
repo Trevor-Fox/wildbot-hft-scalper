@@ -47,7 +47,7 @@ config = ScalperConfig(
     live_mode=True,
     maker_fee_bps=16.0,
     min_profit_bps=4.0,
-    min_volatility_bps=20.0,
+    min_volatility_bps=3.0,
     max_hold_seconds=120.0,
     stop_loss_bps=20.0,
 )

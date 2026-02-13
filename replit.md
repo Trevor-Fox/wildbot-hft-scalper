@@ -103,7 +103,9 @@ WildBot is a high-frequency trading (HFT) scalping bot that connects to Kraken v
 - `SESSION_SECRET` — Flask session secret
 
 ## Recent Changes
-- 2026-02-13: Added volatility gate: bot only enters new positions when rolling price volatility > 20bps, preventing entries in dead markets where exits can't fill
+- 2026-02-13: Fixed BTC dust threshold: raised from 1e-12 to order_qty/10 (0.00001 BTC) to prevent Kraken "Insufficient funds" errors from residual dust. Added _dust_qty property, filtered dust at source in balance initialization
+- 2026-02-13: Lowered volatility gate from 20bps to 3bps — 20bps was unrealistic for 100-tick (~10s) rolling window
+- 2026-02-13: Added volatility gate: bot only enters new positions when rolling price volatility > 3bps, preventing entries in dead markets where exits can't fill
 - 2026-02-13: Widened entry offset from 2bps to 20bps (maker_fee + profit) so exit target is only 16bps further instead of 34bps
 - 2026-02-13: Added time-based stop-loss: force-exits positions held > 120s without reaching target
 - 2026-02-13: Added price stop-loss: force-exits when adverse move > 20bps to limit downside
