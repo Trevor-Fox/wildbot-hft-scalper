@@ -778,6 +778,7 @@ class HFTScalper:
         self._last_force_exit_time: float = 0.0
         self._force_exit_order_time: float = 0.0
         self._force_exit_fail_count: int = 0
+        self._post_exit_cooldown: float = 120.0
 
     @property
     def momentum_signal(self) -> str:
@@ -1095,6 +1096,14 @@ class HFTScalper:
             self._status_reason = "volatility_low"
             return
 
+        exit_cooldown_active = (
+            self._last_force_exit_time > 0
+            and (now_mono - self._last_force_exit_time) < self._post_exit_cooldown
+        )
+        if exit_cooldown_active and abs(self.risk.position) < self.risk._dust_qty:
+            self._status_reason = "exit_cooldown"
+            return
+
         if abs(self.risk.position) < self.risk._dust_qty:
             self._status_reason = "active"
         elif self.orders.open_count > 0:
@@ -1118,8 +1127,9 @@ class HFTScalper:
             and self.risk.can_place_sell()
             and self.orders.open_count < self.config.max_open_orders
         ):
+            sell_qty = abs(self.risk.position) if abs(self.risk.position) > self.risk._dust_qty else self.config.order_qty
             self.orders.create_order(
-                OrderSide.SELL, sell_price, self.config.order_qty
+                OrderSide.SELL, sell_price, sell_qty
             )
 
         if self._update_count % 50 == 0:
@@ -1500,6 +1510,7 @@ class PairTrader:
         self._last_force_exit_time: float = 0.0
         self._force_exit_order_time: float = 0.0
         self._force_exit_fail_count: int = 0
+        self._post_exit_cooldown: float = 120.0
         self._allocated_balance: float = allocated_balance
         self._qty_sized: bool = False
         self._tick_lock = threading.Lock()
@@ -1767,6 +1778,14 @@ class PairTrader:
 
         if abs(self.risk.position) < self.risk._dust_qty and self._volatility_bps < self.config.min_volatility_bps:
             self._status_reason = "volatility_low"
+            return
+
+        exit_cooldown_active = (
+            self._last_force_exit_time > 0
+            and (now_mono - self._last_force_exit_time) < self._post_exit_cooldown
+        )
+        if exit_cooldown_active and abs(self.risk.position) < self.risk._dust_qty:
+            self._status_reason = "exit_cooldown"
             return
 
         if abs(self.risk.position) < self.risk._dust_qty:
@@ -2164,6 +2183,7 @@ class MultiPairOrchestrator:
                 "DOGE": "DOGEUSDC", "XRP": "XRPUSDC", "LINK": "LINKUSDC",
                 "AVAX": "AVAXUSDC", "ADA": "ADAUSDC",
             }
+            failed_assets = []
             for asset_name, keys in asset_keys_map.items():
                 asset_bal = sum(balances.get(k, 0.0) for k in keys)
                 if asset_bal > 0:
@@ -2196,6 +2216,36 @@ class MultiPairOrchestrator:
                                     usd_bal += balances[key]
                         except Exception as e:
                             logger.warning(f"Failed to sell stranded {asset_name}: {e}")
+                            failed_assets.append(asset_name)
+            for asset_name in failed_assets:
+                keys = asset_keys_map[asset_name]
+                asset_bal = sum(balances.get(k, 0.0) for k in keys)
+                pair_cfg = next((p for p in SCAN_PAIRS if p.display_name == asset_name), None)
+                min_qty = pair_cfg.min_qty if pair_cfg else 0.0001
+                if asset_bal >= min_qty:
+                    rest_pair = pair_rest_map.get(asset_name, f"{asset_name}USDC")
+                    logger.info(f"Retrying stranded {asset_name} sell: {asset_bal}")
+                    try:
+                        qty_dec = pair_cfg.qty_decimals if pair_cfg else 8
+                        sell_qty = int(asset_bal / min_qty) * min_qty
+                        sell_qty = round(sell_qty, qty_dec)
+                        qty_str = f"{sell_qty:.{qty_dec}f}"
+                        self._kraken.add_order(
+                            pair=rest_pair,
+                            side="sell",
+                            order_type="market",
+                            volume=qty_str,
+                            oflags="",
+                        )
+                        logger.info(f"Sold stranded {asset_name} (retry): {qty_str}")
+                        time.sleep(2)
+                        balances = self._kraken.get_balance()
+                        usd_bal = 0.0
+                        for key in ["ZUSD", "USD", "USDT", "ZUSDT", "USDC", "ZUSDC"]:
+                            if key in balances and balances[key] > 0:
+                                usd_bal += balances[key]
+                    except Exception as e:
+                        logger.warning(f"Retry failed for stranded {asset_name}: {e}")
 
             self.total_balance = usd_bal
             self._initial_capital = usd_bal
