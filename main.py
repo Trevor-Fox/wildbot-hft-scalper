@@ -1,6 +1,7 @@
 import logging
 import os
 import subprocess
+import sys
 import threading
 import time
 
@@ -19,51 +20,54 @@ _start_lock = threading.Lock()
 
 def _init_and_run_scalper():
     global orchestrator, bot_ready
-    import asyncio
-    from hft_scalper import MultiPairOrchestrator, ScalperConfig, PairScanner, SCAN_PAIRS
-    from kraken_client import KrakenClient
-
-    config = ScalperConfig(
-        symbol="BTC/USDC",
-        ws_url="wss://ws.kraken.com/v2",
-        ws_symbol="BTC/USDC",
-        rest_pair="XBTUSDC",
-        starting_capital=16.0,
-        order_qty=0.0001,
-        max_spread_bps=15.0,
-        stale_order_ms=10000.0,
-        max_position=0.01,
-        max_open_orders=2,
-        live_mode=True,
-        maker_fee_bps=16.0,
-        min_profit_bps=2.0,
-        target_exit_bps=50.0,
-        min_volatility_bps=0.1,
-        max_hold_seconds=300.0,
-        stop_loss_bps=60.0,
-        fill_cooldown_ms=200.0,
-        volatility_exit_multiplier=1.2,
-        min_hold_seconds=30.0,
-        base_hold_seconds=600.0,
-        max_hold_scaling=3.0,
-        requote_threshold_bps=15.0,
-    )
-
-    kraken = KrakenClient()
-    scanner = PairScanner(SCAN_PAIRS)
-    orchestrator = MultiPairOrchestrator(
-        base_config=config,
-        kraken_client=kraken,
-        scanner=scanner,
-        max_active_pairs=3,
-    )
-    bot_ready = True
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
     try:
-        loop.run_until_complete(orchestrator.run())
-    finally:
-        loop.close()
+        import asyncio
+        from hft_scalper import MultiPairOrchestrator, ScalperConfig, PairScanner, SCAN_PAIRS
+        from kraken_client import KrakenClient
+
+        config = ScalperConfig(
+            symbol="BTC/USDC",
+            ws_url="wss://ws.kraken.com/v2",
+            ws_symbol="BTC/USDC",
+            rest_pair="XBTUSDC",
+            starting_capital=16.0,
+            order_qty=0.0001,
+            max_spread_bps=15.0,
+            stale_order_ms=10000.0,
+            max_position=0.01,
+            max_open_orders=2,
+            live_mode=True,
+            maker_fee_bps=16.0,
+            min_profit_bps=2.0,
+            target_exit_bps=50.0,
+            min_volatility_bps=0.1,
+            max_hold_seconds=300.0,
+            stop_loss_bps=60.0,
+            fill_cooldown_ms=200.0,
+            volatility_exit_multiplier=1.2,
+            min_hold_seconds=30.0,
+            base_hold_seconds=600.0,
+            max_hold_scaling=3.0,
+            requote_threshold_bps=15.0,
+        )
+
+        kraken = KrakenClient()
+        scanner = PairScanner(SCAN_PAIRS)
+        orchestrator = MultiPairOrchestrator(
+            base_config=config,
+            kraken_client=kraken,
+            scanner=scanner,
+            max_active_pairs=3,
+        )
+        bot_ready = True
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(orchestrator.run())
+        finally:
+            loop.close()
+    except Exception as e:
+        logging.getLogger("HFTScalper").error(f"Scalper thread crashed: {e}", exc_info=True)
 
 
 def _ensure_scalper_started():
@@ -164,17 +168,15 @@ def health():
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    for attempt in range(5):
+    for attempt in range(3):
         try:
             result = subprocess.run(["fuser", f"{port}/tcp"], capture_output=True, text=True, timeout=5)
             if result.stdout.strip():
                 subprocess.run(["fuser", "-k", "-9", f"{port}/tcp"], capture_output=True, timeout=5)
-                time.sleep(2)
+                time.sleep(1)
             else:
                 break
         except Exception:
-            pass
-        time.sleep(1)
-
+            break
     _ensure_scalper_started()
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=port, threaded=True)
