@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>WildBot HFT Scalper</title>
+<title>WildBot MultiPair Scalper</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body {
@@ -41,6 +41,17 @@
   }
   .mode-live { background: #f7768e22; color: #f7768e; border: 1px solid #f7768e55; }
   .mode-paper { background: #565f8922; color: #565f89; border: 1px solid #565f8955; }
+  .pairs-badge {
+    display: inline-block;
+    padding: 3px 12px;
+    border-radius: 4px;
+    font-size: 0.75rem;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    background: #7aa2f722;
+    color: #7aa2f7;
+    border: 1px solid #7aa2f755;
+  }
   .grid { display: grid; gap: 12px; margin-bottom: 20px; }
   .grid-4 { grid-template-columns: repeat(4, 1fr); }
   .grid-5 { grid-template-columns: repeat(5, 1fr); }
@@ -96,7 +107,7 @@
     margin-bottom: 20px;
     display: flex;
     align-items: center;
-    gap: 16px;
+    gap: 12px;
     flex-wrap: wrap;
   }
   .status-reason-badge {
@@ -108,6 +119,15 @@
     letter-spacing: 0.05em;
     text-transform: uppercase;
   }
+  .status-summary-item {
+    display: inline-block;
+    padding: 4px 12px;
+    border-radius: 6px;
+    font-size: 0.78rem;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+  }
   .reason-active { background: #9ece6a22; color: #9ece6a; border: 1px solid #9ece6a55; }
   .reason-waiting_fill { background: #7aa2f722; color: #7aa2f7; border: 1px solid #7aa2f755; }
   .reason-volatility_low { background: #e0af6822; color: #e0af68; border: 1px solid #e0af6855; }
@@ -117,11 +137,16 @@
   .reason-time_stop { background: #f7768e22; color: #f7768e; border: 1px solid #f7768e55; }
   .reason-stop_loss { background: #f7768e22; color: #f7768e; border: 1px solid #f7768e55; }
   .reason-initializing { background: #565f8922; color: #565f89; border: 1px solid #565f8955; }
-  .spread-info {
-    font-size: 0.82rem;
-    color: #c0caf5;
+  .trading-badge {
+    display: inline-block;
+    padding: 2px 10px;
+    border-radius: 4px;
+    font-size: 0.8rem;
+    font-weight: 600;
+    background: #7aa2f722;
+    color: #7aa2f7;
+    border: 1px solid #7aa2f755;
   }
-  .spread-info span { margin-right: 16px; }
   .stopped-badge {
     display: inline-block;
     background: #f7768e22;
@@ -169,6 +194,7 @@
   .trade-table tr:last-child td { border-bottom: none; }
   .trade-table .buy-row { color: #9ece6a; }
   .trade-table .sell-row { color: #f7768e; }
+  .position-row { background: #7aa2f710; }
   .empty-trades {
     color: #565f89;
     text-align: center;
@@ -188,19 +214,14 @@
 <body>
 <header>
   <div class="status-dot" id="statusDot"></div>
-  <h1>WildBot HFT Scalper</h1>
+  <h1>WildBot MultiPair Scalper</h1>
   <span class="status-label" id="statusLabel">connecting...</span>
   <span class="mode-badge" id="modeBadge">—</span>
+  <span class="pairs-badge" id="pairsBadge">0/0 pairs</span>
 </header>
 
 <div class="status-reason-bar" id="statusReasonBar">
-  <span class="status-reason-badge reason-initializing" id="statusReasonBadge">INITIALIZING</span>
-  <div class="spread-info">
-    <span>Spread: <strong class="mono" id="spreadBps">—</strong> bps</span>
-    <span>Exit Target: <strong class="mono" id="minEdgeBps">—</strong> bps</span>
-    <span>Fee/RT: <strong class="mono" id="feeBps">—</strong> bps</span>
-    <span>Volatility: <strong class="mono" id="volBps">—</strong> bps</span>
-  </div>
+  <span class="status-summary-item reason-initializing">INITIALIZING</span>
 </div>
 
 <div class="grid grid-4">
@@ -228,8 +249,8 @@
     <div class="card-value mono" id="realizedPnl">—</div>
   </div>
   <div class="card">
-    <div class="card-label">Unrealized PnL</div>
-    <div class="card-value mono" id="unrealizedPnl">—</div>
+    <div class="card-label">Total Fees</div>
+    <div class="card-value mono red" id="totalFees">—</div>
   </div>
   <div class="card">
     <div class="card-label">Win / Loss</div>
@@ -240,63 +261,35 @@
     <div class="card-value mono" id="winRate">—</div>
   </div>
   <div class="card">
-    <div class="card-label">Max Drawdown %</div>
-    <div class="card-value mono red" id="maxDrawdown">—</div>
+    <div class="card-label">Active Pairs</div>
+    <div class="card-value mono blue" id="activePairCount">—</div>
   </div>
 </div>
 
-<div class="section-title">Market Data</div>
-<div class="info-grid" style="margin-bottom:20px;">
-  <div class="info-item">
-    <span class="info-label">Symbol</span>
-    <span class="info-value blue" id="symbol">—</span>
-  </div>
-  <div class="info-item">
-    <span class="info-label">Best Bid</span>
-    <span class="info-value mono green" id="bestBid">—</span>
-  </div>
-  <div class="info-item">
-    <span class="info-label">Best Ask</span>
-    <span class="info-value mono red" id="bestAsk">—</span>
-  </div>
-  <div class="info-item">
-    <span class="info-label">Spread (bps)</span>
-    <span class="info-value mono" id="spread">—</span>
-  </div>
-  <div class="info-item">
-    <span class="info-label">Microprice</span>
-    <span class="info-value mono purple" id="microprice">—</span>
-  </div>
-  <div class="info-item">
-    <span class="info-label">Position</span>
-    <span class="info-value mono" id="position">—</span>
-  </div>
-  <div class="info-item">
-    <span class="info-label">Avg Entry</span>
-    <span class="info-value mono yellow" id="avgEntry">—</span>
-  </div>
-  <div class="info-item">
-    <span class="info-label">Open Orders</span>
-    <span class="info-value mono blue" id="openOrders">—</span>
-  </div>
+<div class="section-title">Active Pairs</div>
+<div class="trade-table-wrap" style="margin-bottom:20px;">
+  <table class="trade-table" id="activePairsTable">
+    <thead>
+      <tr>
+        <th>Symbol</th>
+        <th>Status</th>
+        <th>Bid / Ask</th>
+        <th>Position</th>
+        <th>Avg Entry</th>
+        <th>PnL</th>
+        <th>Unrealized</th>
+        <th>Orders</th>
+        <th>Vol (bps)</th>
+      </tr>
+    </thead>
+    <tbody id="activePairsBody">
+      <tr><td colspan="9" class="empty-trades">No active pairs</td></tr>
+    </tbody>
+  </table>
 </div>
 
 <div class="section-title">Pair Scanner</div>
 <div class="trade-table-wrap" style="margin-bottom:20px;">
-  <div style="display:flex;gap:20px;margin-bottom:12px;flex-wrap:wrap;">
-    <div class="info-item" style="flex:1;min-width:140px;">
-      <span class="info-label">Active Pair</span>
-      <span class="info-value mono green" id="activePair">—</span>
-    </div>
-    <div class="info-item" style="flex:1;min-width:140px;">
-      <span class="info-label">Dynamic Exit Target</span>
-      <span class="info-value mono yellow" id="dynExitBps">—</span>
-    </div>
-    <div class="info-item" style="flex:1;min-width:140px;">
-      <span class="info-label">Dynamic Hold Time</span>
-      <span class="info-value mono blue" id="dynHoldSec">—</span>
-    </div>
-  </div>
   <table class="trade-table" id="scannerTable">
     <thead>
       <tr>
@@ -314,35 +307,11 @@
   </table>
 </div>
 
-<div class="section-title">Strategy Indicators</div>
-<div class="info-grid" style="margin-bottom:20px;">
-  <div class="info-item">
-    <span class="info-label">EMA (50)</span>
-    <span class="info-value mono purple" id="ema">—</span>
-  </div>
-  <div class="info-item">
-    <span class="info-label">Momentum</span>
-    <span class="info-value" id="momentum">—</span>
-  </div>
-  <div class="info-item">
-    <span class="info-label">Inventory Skew</span>
-    <span class="info-value mono" id="inventorySkew">—</span>
-  </div>
-  <div class="info-item">
-    <span class="info-label">Status</span>
-    <span class="info-value" id="stoppedStatus">—</span>
-  </div>
-</div>
-
 <div class="section-title">Activity</div>
 <div class="info-grid" style="margin-bottom:20px;">
   <div class="info-item">
     <span class="info-label">Uptime</span>
     <span class="info-value mono" id="uptime">—</span>
-  </div>
-  <div class="info-item">
-    <span class="info-label">Ticks Processed</span>
-    <span class="info-value mono blue" id="updates">—</span>
   </div>
   <div class="info-item">
     <span class="info-label">Starting Capital</span>
@@ -356,6 +325,7 @@
     <thead>
       <tr>
         <th>Time</th>
+        <th>Pair</th>
         <th>Side</th>
         <th>Price</th>
         <th>Qty</th>
@@ -364,7 +334,7 @@
       </tr>
     </thead>
     <tbody id="tradeBody">
-      <tr><td colspan="6" class="empty-trades">No trades yet</td></tr>
+      <tr><td colspan="7" class="empty-trades">No trades yet</td></tr>
     </tbody>
   </table>
 </div>
@@ -379,15 +349,22 @@ function formatUptime(s) {
   return (h > 0 ? h + 'h ' : '') + m + 'm ' + sec + 's';
 }
 
-function formatSpreadBps(spread, mid) {
-  if (!mid || mid === 0) return '—';
-  return ((spread / mid) * 10000).toFixed(2);
-}
-
 function formatTime(ts) {
   var d = new Date(ts * 1000);
   return d.toLocaleTimeString();
 }
+
+var reasonLabels = {
+  'active': 'ACTIVE',
+  'waiting_fill': 'WAITING FILL',
+  'volatility_low': 'LOW VOL',
+  'spread_wide': 'WIDE SPREAD',
+  'drawdown_stopped': 'DRAWDOWN',
+  'cooldown': 'COOLDOWN',
+  'time_stop': 'TIME STOP',
+  'stop_loss': 'STOP LOSS',
+  'initializing': 'INITIALIZING'
+};
 
 function update() {
   fetch('/api/status')
@@ -411,86 +388,92 @@ function update() {
         modeBadge.className = 'mode-badge mode-paper';
       }
 
-      document.getElementById('balance').textContent = '$' + d.balance.toFixed(2);
-      document.getElementById('equity').textContent = '$' + d.equity.toFixed(2);
+      var activePairs = d.active_pairs || [];
+      var maxPairs = d.max_active_pairs || 0;
+      document.getElementById('pairsBadge').textContent = activePairs.length + '/' + maxPairs + ' pairs';
+
+      document.getElementById('balance').textContent = '$' + (d.total_balance || 0).toFixed(2);
+      document.getElementById('equity').textContent = '$' + (d.total_equity || 0).toFixed(2);
 
       var retEl = document.getElementById('returnPct');
-      retEl.textContent = d.return_pct.toFixed(2) + '%';
-      retEl.className = 'card-value mono ' + pnlColor(d.return_pct);
+      var retVal = d.return_pct || 0;
+      retEl.textContent = retVal.toFixed(2) + '%';
+      retEl.className = 'card-value mono ' + pnlColor(retVal);
 
-      document.getElementById('tradeCount').textContent = d.trade_count;
+      document.getElementById('tradeCount').textContent = d.total_trades || 0;
 
       var rpEl = document.getElementById('realizedPnl');
-      rpEl.textContent = '$' + d.pnl.toFixed(4);
-      rpEl.className = 'card-value mono ' + pnlColor(d.pnl);
+      var pnlVal = d.total_pnl || 0;
+      rpEl.textContent = '$' + pnlVal.toFixed(4);
+      rpEl.className = 'card-value mono ' + pnlColor(pnlVal);
 
-      var upEl = document.getElementById('unrealizedPnl');
-      upEl.textContent = '$' + d.unrealized_pnl.toFixed(4);
-      upEl.className = 'card-value mono ' + pnlColor(d.unrealized_pnl);
+      document.getElementById('totalFees').textContent = '$' + (d.total_fees || 0).toFixed(4);
 
       var wlEl = document.getElementById('winLoss');
-      wlEl.innerHTML = '<span class="green">' + d.wins + 'W</span> / <span class="red">' + d.losses + 'L</span>';
+      wlEl.innerHTML = '<span class="green">' + (d.total_wins || 0) + 'W</span> / <span class="red">' + (d.total_losses || 0) + 'L</span>';
 
-      document.getElementById('winRate').textContent = d.win_rate.toFixed(1) + '%';
+      var wrVal = d.win_rate || 0;
       var wrEl = document.getElementById('winRate');
-      wrEl.className = 'card-value mono ' + (d.win_rate >= 50 ? 'green' : d.win_rate > 0 ? 'yellow' : '');
+      wrEl.textContent = wrVal.toFixed(1) + '%';
+      wrEl.className = 'card-value mono ' + (wrVal >= 50 ? 'green' : wrVal > 0 ? 'yellow' : '');
 
-      document.getElementById('maxDrawdown').textContent = d.max_drawdown_pct.toFixed(2) + '%';
+      document.getElementById('activePairCount').textContent = activePairs.length;
 
-      document.getElementById('symbol').textContent = d.symbol;
+      var statusCounts = {};
+      var activeSymbols = {};
+      for (var pi = 0; pi < activePairs.length; pi++) {
+        var p = activePairs[pi];
+        var sr = p.status_reason || 'active';
+        statusCounts[sr] = (statusCounts[sr] || 0) + 1;
+        activeSymbols[p.symbol] = true;
+      }
 
-      var tob = d.tob;
-      var mid = tob.mid_price || 0;
-      document.getElementById('bestBid').textContent = mid > 0 ? tob.best_bid.toFixed(2) : '—';
-      document.getElementById('bestAsk').textContent = mid > 0 ? tob.best_ask.toFixed(2) : '—';
-      document.getElementById('spread').textContent = formatSpreadBps(tob.spread, mid);
-      document.getElementById('microprice').textContent = mid > 0 ? tob.microprice.toFixed(2) : '—';
-      document.getElementById('openOrders').textContent = d.open_orders;
-      document.getElementById('position').textContent = d.position.toFixed(6);
+      var statusBar = document.getElementById('statusReasonBar');
+      if (activePairs.length === 0) {
+        statusBar.innerHTML = '<span class="status-summary-item reason-initializing">NO ACTIVE PAIRS</span>';
+      } else {
+        var statusHtml = '';
+        for (var reason in statusCounts) {
+          var label = reasonLabels[reason] || reason.toUpperCase();
+          statusHtml += '<span class="status-summary-item reason-' + reason + '">' + statusCounts[reason] + ' ' + label + '</span>';
+        }
+        statusBar.innerHTML = statusHtml;
+      }
 
-      var avgEl = document.getElementById('avgEntry');
-      avgEl.textContent = d.avg_entry_price > 0 ? '$' + d.avg_entry_price.toFixed(2) : '—';
+      var apBody = document.getElementById('activePairsBody');
+      if (activePairs.length === 0) {
+        apBody.innerHTML = '<tr><td colspan="9" class="empty-trades">No active pairs</td></tr>';
+      } else {
+        var apRows = '';
+        for (var ai = 0; ai < activePairs.length; ai++) {
+          var ap = activePairs[ai];
+          var hasPos = ap.position && ap.position !== 0;
+          var rowCls = hasPos ? ' class="position-row"' : '';
+          var tob = ap.tob || {};
+          var bidAsk = (tob.bid ? tob.bid.toFixed(6) : '—') + ' / ' + (tob.ask ? tob.ask.toFixed(6) : '—');
+          var apReason = ap.status_reason || 'active';
+          var apReasonLabel = reasonLabels[apReason] || apReason.toUpperCase();
 
-      document.getElementById('ema').textContent = d.ema > 0 ? d.ema.toFixed(2) : '—';
+          apRows += '<tr' + rowCls + '>';
+          apRows += '<td class="mono blue">' + ap.symbol + '</td>';
+          apRows += '<td><span class="status-summary-item reason-' + apReason + '">' + apReasonLabel + '</span></td>';
+          apRows += '<td class="mono"><span class="green">' + (tob.bid ? tob.bid.toFixed(6) : '—') + '</span> / <span class="red">' + (tob.ask ? tob.ask.toFixed(6) : '—') + '</span></td>';
+          apRows += '<td class="mono' + (hasPos ? (ap.position > 0 ? ' green' : ' red') : '') + '">' + (ap.position || 0).toFixed(4) + '</td>';
+          apRows += '<td class="mono yellow">' + (ap.avg_entry_price > 0 ? '$' + ap.avg_entry_price.toFixed(6) : '—') + '</td>';
+          apRows += '<td class="mono ' + pnlColor(ap.pnl) + '">' + (ap.pnl || 0).toFixed(4) + '</td>';
+          apRows += '<td class="mono ' + pnlColor(ap.unrealized_pnl) + '">' + (ap.unrealized_pnl || 0).toFixed(4) + '</td>';
+          apRows += '<td class="mono blue">' + (ap.open_orders || 0) + '</td>';
+          apRows += '<td class="mono' + ((ap.volatility_bps || 0) > 5 ? ' yellow' : '') + '">' + (ap.volatility_bps || 0).toFixed(2) + '</td>';
+          apRows += '</tr>';
+        }
+        apBody.innerHTML = apRows;
+      }
 
-      var momEl = document.getElementById('momentum');
-      var momClass = d.momentum === 'up' ? 'momentum-up' : d.momentum === 'down' ? 'momentum-down' : 'momentum-neutral';
-      momEl.innerHTML = '<span class="momentum-badge ' + momClass + '">' + d.momentum.toUpperCase() + '</span>';
-
-      var skewEl = document.getElementById('inventorySkew');
-      var skewVal = d.position / 0.01;
-      var skewDir = skewVal > 0.01 ? 'LONG bias' : skewVal < -0.01 ? 'SHORT bias' : 'Neutral';
-      var skewColor = skewVal > 0.01 ? 'green' : skewVal < -0.01 ? 'red' : '';
-      skewEl.textContent = skewDir + ' (' + (skewVal * 100).toFixed(0) + '%)';
-      skewEl.className = 'info-value mono ' + skewColor;
-
-      document.getElementById('uptime').textContent = formatUptime(d.uptime);
-      document.getElementById('updates').textContent = d.updates_processed.toLocaleString();
-      document.getElementById('startingCapital').textContent = '$' + d.starting_capital.toFixed(2);
-
-      var reasonBadge = document.getElementById('statusReasonBadge');
-      var reason = d.status_reason || 'initializing';
-      var reasonLabels = {
-        'active': 'ACTIVE',
-        'waiting_fill': 'WAITING FOR FILL',
-        'volatility_low': 'LOW VOLATILITY',
-        'spread_wide': 'SPREAD TOO WIDE',
-        'drawdown_stopped': 'DRAWDOWN STOPPED',
-        'cooldown': 'FILL COOLDOWN',
-        'time_stop': 'TIME STOP',
-        'stop_loss': 'STOP LOSS',
-        'initializing': 'INITIALIZING'
-      };
-      reasonBadge.textContent = reasonLabels[reason] || reason.toUpperCase();
-      reasonBadge.className = 'status-reason-badge reason-' + reason;
-      document.getElementById('spreadBps').textContent = (d.spread_bps || 0).toFixed(2);
-      document.getElementById('minEdgeBps').textContent = (d.min_edge_bps || 0).toFixed(2);
-      document.getElementById('feeBps').textContent = (2 * (d.fee_bps || 0)).toFixed(1);
-      document.getElementById('volBps').textContent = (d.volatility_bps || 0).toFixed(2);
-
-      document.getElementById('activePair').textContent = d.active_pair || '—';
-      document.getElementById('dynExitBps').textContent = (d.dynamic_exit_bps || 0).toFixed(2) + ' bps';
-      document.getElementById('dynHoldSec').textContent = (d.dynamic_hold_seconds || 0).toFixed(0) + 's';
+      document.getElementById('uptime').textContent = formatUptime(d.uptime || 0);
+      var scEl = document.getElementById('startingCapital');
+      if (d.starting_capital !== undefined) {
+        scEl.textContent = '$' + d.starting_capital.toFixed(2);
+      }
 
       var scannerData = d.scanner_data || [];
       var scanBody = document.getElementById('scannerBody');
@@ -501,31 +484,30 @@ function update() {
         var srows = '';
         for (var si = 0; si < scannerData.length; si++) {
           var sp = scannerData[si];
-          var rowStyle = sp.active ? ' style="background:#9ece6a15;"' : '';
+          var isTrading = activeSymbols[sp.symbol] || false;
+          var rowStyle = isTrading ? ' style="background:#7aa2f715;"' : (sp.active ? ' style="background:#9ece6a15;"' : '');
           srows += '<tr' + rowStyle + '>';
-          srows += '<td class="mono' + (sp.active ? ' green' : '') + '">' + sp.symbol + '</td>';
+          srows += '<td class="mono' + (isTrading ? ' blue' : sp.active ? ' green' : '') + '">' + sp.symbol + '</td>';
           srows += '<td class="mono">' + (sp.mid_price > 0 ? '$' + sp.mid_price : '—') + '</td>';
           srows += '<td class="mono' + (sp.volatility_bps > 5 ? ' yellow' : '') + '">' + sp.volatility_bps.toFixed(2) + '</td>';
           srows += '<td class="mono">' + sp.spread_bps.toFixed(2) + '</td>';
           srows += '<td class="mono">' + sp.data_points + '</td>';
-          srows += '<td>' + (sp.active ? '<span class="momentum-badge momentum-up">ACTIVE</span>' : '—') + '</td>';
+          if (isTrading) {
+            srows += '<td><span class="trading-badge">TRADING</span></td>';
+          } else if (sp.active) {
+            srows += '<td><span class="momentum-badge momentum-up">ACTIVE</span></td>';
+          } else {
+            srows += '<td>—</td>';
+          }
           srows += '</tr>';
         }
         scanBody.innerHTML = srows;
       }
 
-      var stEl = document.getElementById('stoppedStatus');
-      if (d.is_stopped) {
-        stEl.innerHTML = '<span class="stopped-badge">STOPPED — Drawdown</span>';
-      } else {
-        stEl.textContent = 'Active';
-        stEl.className = 'info-value green';
-      }
-
       var tbody = document.getElementById('tradeBody');
       var trades = d.trade_history || [];
       if (trades.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="6" class="empty-trades">No trades yet</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="7" class="empty-trades">No trades yet</td></tr>';
       } else {
         var rows = '';
         for (var i = trades.length - 1; i >= 0; i--) {
@@ -533,6 +515,7 @@ function update() {
           var rowClass = t.side === 'buy' ? 'buy-row' : 'sell-row';
           rows += '<tr class="' + rowClass + '">';
           rows += '<td class="mono">' + formatTime(t.time) + '</td>';
+          rows += '<td class="mono blue">' + (t.symbol || '—') + '</td>';
           rows += '<td>' + t.side.toUpperCase() + '</td>';
           rows += '<td class="mono">$' + t.price.toFixed(2) + '</td>';
           rows += '<td class="mono">' + t.qty + '</td>';

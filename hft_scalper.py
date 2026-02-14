@@ -1,4 +1,5 @@
 import asyncio
+import copy
 import json
 import os
 import statistics
@@ -1389,3 +1390,755 @@ class HFTScalper:
             f"avg_entry={self.risk.avg_entry_price:.2f} "
             f"ema={self._ema:.2f}"
         )
+
+
+class PairTrader:
+    def __init__(self, pair_config: PairConfig, base_config: ScalperConfig, kraken_client, telegram: TelegramNotifier, allocated_balance: float):
+        self.pair_config = pair_config
+        self.config = copy.deepcopy(base_config)
+        self.config.symbol = pair_config.ws_symbol
+        self.config.ws_symbol = pair_config.ws_symbol
+        self.config.rest_pair = pair_config.rest_pair
+        self.config.order_qty = pair_config.min_qty
+        self.config.max_position = pair_config.min_qty * 100
+        self.config.price_decimals = pair_config.price_decimals
+        self.config.starting_capital = allocated_balance
+
+        self.tob = TopOfBook()
+        self.risk = RiskManager(self.config)
+        self.risk.balance = allocated_balance
+        self.risk.starting_capital = allocated_balance
+        self.risk.peak_equity = allocated_balance
+
+        self._kraken = kraken_client
+        self.orders = OrderManager(self.config, kraken_client=kraken_client)
+        self.orders._price_decimals = pair_config.price_decimals
+        self.orders._qty_decimals = pair_config.qty_decimals
+        self.telegram = telegram
+
+        self._update_count: int = 0
+        self._ema: float = 0.0
+        self._ema_alpha: float = 2.0 / (self.config.ema_window + 1)
+        self._trade_history: list[dict] = []
+        self._price_history: list[float] = []
+        self._volatility_bps: float = 0.0
+        self._drawdown_alerted: bool = False
+        self._live_fill_poll_interval: float = 3.0
+        self._last_live_fill_poll: float = 0.0
+        self._status_reason: str = "initializing"
+        self._last_force_exit_time: float = 0.0
+        self._allocated_balance: float = allocated_balance
+
+    @property
+    def allocated_balance(self) -> float:
+        return self._allocated_balance
+
+    @allocated_balance.setter
+    def allocated_balance(self, value: float):
+        self._allocated_balance = value
+        self.risk.balance = value
+        self.risk.starting_capital = value
+
+    @property
+    def momentum_signal(self) -> str:
+        if self._ema == 0:
+            return "neutral"
+        mid = self.tob.mid_price
+        if mid <= 0:
+            return "neutral"
+        diff_pct = (mid - self._ema) / self._ema * 100
+        if diff_pct > 0.01:
+            return "up"
+        elif diff_pct < -0.01:
+            return "down"
+        return "neutral"
+
+    def _update_ema(self):
+        mid = self.tob.mid_price
+        if mid <= 0:
+            return
+        if self._ema == 0:
+            self._ema = mid
+        else:
+            self._ema = self._ema_alpha * mid + (1 - self._ema_alpha) * self._ema
+
+        self._price_history.append(mid)
+        if len(self._price_history) > self.config.volatility_window:
+            self._price_history = self._price_history[-self.config.volatility_window:]
+        if len(self._price_history) >= 20:
+            mean = sum(self._price_history) / len(self._price_history)
+            if mean > 0:
+                self._volatility_bps = (statistics.stdev(self._price_history) / mean) * 10_000
+
+    def update_tob(self, bid: float, ask: float, bid_qty: float, ask_qty: float):
+        self.tob.best_bid = bid
+        self.tob.best_ask = ask
+        self.tob.bid_qty = bid_qty
+        self.tob.ask_qty = ask_qty
+        self.tob.timestamp = time.time()
+
+    def handle_tick(self):
+        self._update_count += 1
+        self._update_ema()
+
+        if self.config.live_mode:
+            now = time.monotonic()
+            fill_interval = getattr(self.orders, '_fill_backoff', self._live_fill_poll_interval)
+            if now - self._last_live_fill_poll >= fill_interval:
+                self._last_live_fill_poll = now
+                filled = self.orders.check_fills_live()
+                if filled:
+                    self.orders._fill_backoff = self._live_fill_poll_interval
+            else:
+                filled = []
+            if self.orders._filled_during_cancel:
+                filled.extend(self.orders._filled_during_cancel)
+                self.orders._filled_during_cancel.clear()
+            if self.orders._needs_balance_sync:
+                self.orders._needs_balance_sync = False
+        else:
+            filled = self.orders.simulate_fill_check(self.tob)
+
+        for order in filled:
+            self.risk.record_fill(order.side, order.price, order.quantity)
+            mid = self.tob.mid_price
+            self._trade_history.append({
+                "time": time.time(),
+                "side": order.side.value,
+                "price": order.price,
+                "qty": order.quantity,
+                "pnl": self.risk.pnl,
+                "balance": self.risk.balance,
+            })
+            if len(self._trade_history) > 50:
+                self._trade_history = self._trade_history[-50:]
+            mode_tag = "LIVE" if self.config.live_mode else "PAPER"
+            side_emoji = "🟢" if order.side == OrderSide.BUY else "🔴"
+            fee_est = order.price * order.quantity * self.config.maker_fee_bps / 10_000
+            self.telegram.send_alert(
+                f"{side_emoji} <b>{mode_tag} Fill</b> | {self.config.symbol}\n"
+                f"{order.side.value.upper()} {order.quantity} @ ${order.price:,.2f}\n"
+                f"Fee: ~${fee_est:,.4f}\n\n"
+                f"Position: {self.risk.position:.6f}\n"
+                f"Avg Entry: ${self.risk.avg_entry_price:,.2f}\n"
+                f"Equity: ${self.risk.equity(mid):,.2f}\n"
+                f"Realized PnL: ${self.risk.pnl:,.4f}\n"
+                f"Total Fees: ${self.risk.fees_paid:,.4f}\n"
+                f"W/L: {self.risk.wins}/{self.risk.losses}"
+            )
+
+        self.risk.update_drawdown(self.tob.mid_price)
+
+        if self.risk.is_stopped:
+            self._status_reason = "drawdown_stopped"
+            self.orders.cancel_all()
+            if not self._drawdown_alerted:
+                self._drawdown_alerted = True
+                self.telegram.send_alert(
+                    f"🚨 <b>WildBot DRAWDOWN STOP</b>\n"
+                    f"{self.config.symbol} trading halted!\n"
+                    f"Max drawdown {self.config.max_drawdown_pct:.1f}% exceeded.\n"
+                    f"Equity: ${self.risk.equity(self.tob.mid_price):,.2f}\n"
+                    f"Realized PnL: ${self.risk.pnl:,.4f}\n"
+                    f"Trades: {self.risk.trade_count}"
+                )
+            return
+
+        if not self.risk.is_spread_acceptable(self.tob):
+            self._status_reason = "spread_wide"
+            if self.orders.open_count > 0:
+                self.orders.cancel_all()
+            return
+
+        now_mono = time.monotonic()
+        force_exit_cooldown = 5.0
+        if abs(self.risk.position) > self.risk._dust_qty and self.risk._position_entry_time > 0:
+            hold_time = now_mono - self.risk._position_entry_time
+            dynamic_hold = self.risk.dynamic_hold_seconds(self.risk.dynamic_exit_bps(self._volatility_bps))
+            if hold_time > dynamic_hold:
+                if (now_mono - self._last_force_exit_time) > force_exit_cooldown:
+                    self._last_force_exit_time = now_mono
+                    self.orders.cancel_all()
+                    exit_price = None
+                    dec = self.config.price_decimals
+                    if self.risk.position > 0:
+                        exit_price = round(self.tob.best_bid * 0.9999, dec)
+                        self.orders.create_order(OrderSide.SELL, exit_price, abs(self.risk.position), force_taker=True)
+                    elif self.risk.position < 0:
+                        exit_price = round(self.tob.best_ask * 1.0001, dec)
+                        self.orders.create_order(OrderSide.BUY, exit_price, abs(self.risk.position), force_taker=True)
+                    if exit_price is not None:
+                        self._status_reason = "time_stop"
+                        logger.warning(f"TIME STOP [{self.config.symbol}]: Position held {hold_time:.0f}s > max {dynamic_hold:.0f}s — force exit at {exit_price}")
+                        self.telegram.send_alert(f"⏰ <b>TIME STOP</b> | {self.config.symbol}\nForce exit after {hold_time:.0f}s\nPrice: ${exit_price:,.2f}")
+                self._status_reason = "time_stop"
+                return
+
+        if abs(self.risk.position) > self.risk._dust_qty and self.risk.avg_entry_price > 0:
+            mid = self.tob.mid_price
+            if self.risk.position > 0:
+                adverse_bps = (self.risk.avg_entry_price - mid) / self.risk.avg_entry_price * 10_000
+            else:
+                adverse_bps = (mid - self.risk.avg_entry_price) / self.risk.avg_entry_price * 10_000
+            if adverse_bps > self.config.stop_loss_bps:
+                if (now_mono - self._last_force_exit_time) > force_exit_cooldown:
+                    self._last_force_exit_time = now_mono
+                    self.orders.cancel_all()
+                    exit_price = None
+                    dec = self.config.price_decimals
+                    if self.risk.position > 0:
+                        exit_price = round(self.tob.best_bid * 0.9999, dec)
+                        self.orders.create_order(OrderSide.SELL, exit_price, abs(self.risk.position), force_taker=True)
+                    elif self.risk.position < 0:
+                        exit_price = round(self.tob.best_ask * 1.0001, dec)
+                        self.orders.create_order(OrderSide.BUY, exit_price, abs(self.risk.position), force_taker=True)
+                    if exit_price is not None:
+                        self._status_reason = "stop_loss"
+                        logger.warning(f"STOP LOSS [{self.config.symbol}]: Adverse move {adverse_bps:.1f}bps > max {self.config.stop_loss_bps:.1f}bps — force exit at {exit_price}")
+                        self.telegram.send_alert(f"🛑 <b>STOP LOSS</b> | {self.config.symbol}\nAdverse move {adverse_bps:.1f}bps\nForce exit at ${exit_price:,.2f}")
+                self._status_reason = "stop_loss"
+                return
+
+        buy_price, sell_price = self.risk.calculate_skewed_prices(self.tob, self._volatility_bps)
+        momentum = self.momentum_signal
+
+        requote_thresh = self.tob.mid_price * self.config.requote_threshold_bps / 10_000
+        for oid, order in list(self.orders.open_orders.items()):
+            if order.status != OrderStatus.OPEN:
+                continue
+            target = buy_price if order.side == OrderSide.BUY else sell_price
+            if target is None:
+                self.orders.cancel_order(oid)
+                continue
+            drift = abs(order.price - target)
+            age_ms = (time.monotonic() - order.placed_at) * 1000
+            if drift > requote_thresh and age_ms > self.config.stale_order_ms:
+                self.orders.cancel_order(oid)
+
+        place_buy = buy_price is not None
+        place_sell = sell_price is not None
+        if self.config.momentum_filter_enabled and abs(self.risk.position) < self.risk._dust_qty:
+            if momentum == "up":
+                place_sell = False
+            elif momentum == "down":
+                place_buy = False
+
+        if abs(self.risk.position) < self.risk._dust_qty and self._volatility_bps < self.config.min_volatility_bps:
+            self._status_reason = "volatility_low"
+            return
+
+        if abs(self.risk.position) < self.risk._dust_qty:
+            self._status_reason = "active"
+        elif self.orders.open_count > 0:
+            self._status_reason = "waiting_fill"
+        else:
+            self._status_reason = "active"
+
+        if (
+            place_buy
+            and not self.orders.has_side(OrderSide.BUY)
+            and self.risk.can_place_buy(buy_price)
+            and self.orders.open_count < self.config.max_open_orders
+        ):
+            self.orders.create_order(OrderSide.BUY, buy_price, self.config.order_qty)
+
+        if (
+            place_sell
+            and not self.orders.has_side(OrderSide.SELL)
+            and self.risk.can_place_sell()
+            and self.orders.open_count < self.config.max_open_orders
+        ):
+            self.orders.create_order(OrderSide.SELL, sell_price, self.config.order_qty)
+
+        if self._update_count % 50 == 0:
+            mid = self.tob.mid_price
+            spread_bps = (self.tob.spread / mid) * 10_000 if mid else 0
+            logger.info(
+                f"[{self.config.symbol}] TOB bid={self.tob.best_bid} ask={self.tob.best_ask} "
+                f"spread={spread_bps:.2f}bps | "
+                f"equity=${self.risk.equity(mid):,.2f} "
+                f"bal=${self.risk.balance:.2f} pos={self.risk.position:.6f} "
+                f"unrealized_pnl=${self.risk.unrealized_pnl(mid):,.4f} "
+                f"realized_pnl={self.risk.pnl:.4f} "
+                f"return={self.risk.return_pct(mid):.2f}% "
+                f"win_rate={self.risk.win_rate:.1f}% "
+                f"max_dd={self.risk.max_drawdown_pct_seen:.2f}% "
+                f"orders={self.orders.open_count} "
+                f"vol={self._volatility_bps:.1f}bps"
+            )
+
+    def get_status(self) -> dict:
+        mid = self.tob.mid_price
+        return {
+            "symbol": self.config.symbol,
+            "balance": self.risk.balance,
+            "equity": self.risk.equity(mid),
+            "position": self.risk.position,
+            "pnl": self.risk.pnl,
+            "unrealized_pnl": self.risk.unrealized_pnl(mid),
+            "trade_count": self.risk.trade_count,
+            "status_reason": self._status_reason,
+            "avg_entry_price": self.risk.avg_entry_price,
+            "volatility_bps": self._volatility_bps,
+            "open_orders": self.orders.open_count,
+            "wins": self.risk.wins,
+            "losses": self.risk.losses,
+            "fees_paid": self.risk.fees_paid,
+            "tob": {
+                "bid": self.tob.best_bid,
+                "ask": self.tob.best_ask,
+                "spread": self.tob.spread,
+                "mid": mid,
+            },
+        }
+
+    def cancel_all_orders(self) -> int:
+        return self.orders.cancel_all()
+
+    def is_flat(self) -> bool:
+        return abs(self.risk.position) < self.risk._dust_qty
+
+
+class MultiPairOrchestrator:
+    def __init__(self, base_config: ScalperConfig, kraken_client=None, scanner: Optional[PairScanner] = None, max_active_pairs: int = 3):
+        self.base_config = base_config
+        self._kraken = kraken_client
+        self.scanner = scanner
+        self.telegram = TelegramNotifier()
+        self.max_active_pairs = max_active_pairs
+        self.active_traders: dict[str, PairTrader] = {}
+        self.total_balance: float = base_config.starting_capital
+        self._initial_capital: float = base_config.starting_capital
+        self._running: bool = False
+        self._update_count: int = 0
+        self._trade_history: list[dict] = []
+        self._live_fill_poll_interval: float = 3.0
+        self._balance_refresh_interval: float = 300.0
+        self._last_balance_refresh: float = 0.0
+        self._traders_lock = threading.Lock()
+
+    def _allocate_balance(self):
+        with self._traders_lock:
+            usable = self.total_balance * 0.98
+            per_pair = usable / self.max_active_pairs
+            for trader in self.active_traders.values():
+                trader.risk.balance = per_pair
+                trader.risk.starting_capital = per_pair
+                trader.risk.peak_equity = max(trader.risk.peak_equity, per_pair)
+                trader._allocated_balance = per_pair
+
+    def _select_pairs(self) -> list[PairConfig]:
+        if not self.scanner:
+            return []
+        per_pair_balance = (self.total_balance * 0.98) / self.max_active_pairs
+        candidates = []
+        for ws_sym, pair_cfg in self.scanner.pairs.items():
+            tob = self.scanner.tobs[ws_sym]
+            vol = self.scanner._volatilities.get(ws_sym, 0.0)
+            if tob.mid_price <= 0:
+                continue
+            if len(self.scanner._price_histories.get(ws_sym, [])) < 20:
+                continue
+            min_notional = pair_cfg.min_qty * tob.mid_price
+            if min_notional > per_pair_balance * 0.95:
+                continue
+            candidates.append((ws_sym, pair_cfg, vol))
+        candidates.sort(key=lambda x: x[2], reverse=True)
+        return [c[1] for c in candidates[:self.max_active_pairs]]
+
+    def _activate_pair(self, pair_config: PairConfig):
+        with self._traders_lock:
+            if pair_config.ws_symbol in self.active_traders:
+                return
+        per_pair_balance = (self.total_balance * 0.98) / self.max_active_pairs
+        trader = PairTrader(
+            pair_config=pair_config,
+            base_config=self.base_config,
+            kraken_client=self._kraken,
+            telegram=self.telegram,
+            allocated_balance=per_pair_balance,
+        )
+        if self.scanner and pair_config.ws_symbol in self.scanner.tobs:
+            scanner_tob = self.scanner.tobs[pair_config.ws_symbol]
+            trader.update_tob(scanner_tob.best_bid, scanner_tob.best_ask, scanner_tob.bid_qty, scanner_tob.ask_qty)
+        with self._traders_lock:
+            self.active_traders[pair_config.ws_symbol] = trader
+        logger.info(f"ACTIVATED pair {pair_config.ws_symbol} with ${per_pair_balance:.2f} allocated")
+
+    def _deactivate_pair(self, ws_symbol: str):
+        with self._traders_lock:
+            trader = self.active_traders.get(ws_symbol)
+        if not trader:
+            return
+        if not trader.is_flat():
+            logger.warning(f"Cannot deactivate {ws_symbol}: position={trader.risk.position}")
+            return
+        trader.cancel_all_orders()
+        self._trade_history.extend(trader._trade_history)
+        if len(self._trade_history) > 200:
+            self._trade_history = self._trade_history[-200:]
+        with self._traders_lock:
+            del self.active_traders[ws_symbol]
+        logger.info(f"DEACTIVATED pair {ws_symbol}")
+
+    def _parse_depth_update(self, raw: str) -> tuple[bool, float, float, float, float, str]:
+        try:
+            data = json.loads(raw)
+            channel = data.get("channel")
+            if channel == "ticker":
+                tick_data = data.get("data", [{}])[0]
+                symbol = tick_data.get("symbol", "")
+                bid = tick_data.get("bid")
+                ask = tick_data.get("ask")
+                bid_qty = tick_data.get("bid_qty")
+                ask_qty = tick_data.get("ask_qty")
+                if bid is not None and ask is not None:
+                    bid_f = float(bid)
+                    ask_f = float(ask)
+                    bid_qty_f = float(bid_qty) if bid_qty else 0.0
+                    ask_qty_f = float(ask_qty) if ask_qty else 0.0
+
+                    if self.scanner:
+                        self.scanner.update(symbol, bid_f, ask_f, bid_qty_f, ask_qty_f)
+
+                    return True, bid_f, ask_f, bid_qty_f, ask_qty_f, symbol
+            elif channel == "heartbeat":
+                return False, 0.0, 0.0, 0.0, 0.0, ""
+            elif data.get("method") == "subscribe" and data.get("success"):
+                logger.info(f"Subscribed to {data.get('result', {}).get('channel', 'unknown')}")
+                return False, 0.0, 0.0, 0.0, 0.0, ""
+        except (json.JSONDecodeError, KeyError, IndexError, ValueError) as exc:
+            logger.warning(f"Parse error: {exc}")
+        return False, 0.0, 0.0, 0.0, 0.0, ""
+
+    def _handle_tick(self, symbol: str, bid: float, ask: float, bid_qty: float, ask_qty: float):
+        with self._traders_lock:
+            trader = self.active_traders.get(symbol)
+        if trader:
+            trader.update_tob(bid, ask, bid_qty, ask_qty)
+            trader.handle_tick()
+
+    def _maybe_swap_pairs(self):
+        if not self.scanner:
+            return
+
+        with self._traders_lock:
+            active_syms = set(self.active_traders.keys())
+            current_count = len(self.active_traders)
+        per_pair_balance = (self.total_balance * 0.98) / self.max_active_pairs
+
+        if current_count < self.max_active_pairs:
+            candidates = self._select_pairs()
+            for pc in candidates:
+                if pc.ws_symbol not in active_syms and len(self.active_traders) < self.max_active_pairs:
+                    self._activate_pair(pc)
+            self._allocate_balance()
+            return
+
+        flat_traders = []
+        for ws_sym, trader in self.active_traders.items():
+            if trader.is_flat():
+                vol = self.scanner._volatilities.get(ws_sym, 0.0)
+                flat_traders.append((ws_sym, vol))
+
+        if not flat_traders:
+            return
+
+        flat_traders.sort(key=lambda x: x[1])
+        worst_sym, worst_vol = flat_traders[0]
+
+        best_inactive_sym = None
+        best_inactive_vol = 0.0
+        best_inactive_cfg = None
+        for ws_sym, pair_cfg in self.scanner.pairs.items():
+            if ws_sym in active_syms:
+                continue
+            tob = self.scanner.tobs[ws_sym]
+            if tob.mid_price <= 0:
+                continue
+            if len(self.scanner._price_histories.get(ws_sym, [])) < 20:
+                continue
+            min_notional = pair_cfg.min_qty * tob.mid_price
+            if min_notional > per_pair_balance * 0.95:
+                continue
+            vol = self.scanner._volatilities.get(ws_sym, 0.0)
+            if vol > best_inactive_vol:
+                best_inactive_vol = vol
+                best_inactive_sym = ws_sym
+                best_inactive_cfg = pair_cfg
+
+        if best_inactive_cfg and best_inactive_vol > worst_vol * 1.5:
+            logger.info(
+                f"SWAP: deactivating {worst_sym} (vol={worst_vol:.1f}bps) "
+                f"for {best_inactive_sym} (vol={best_inactive_vol:.1f}bps)"
+            )
+            self._deactivate_pair(worst_sym)
+            self._activate_pair(best_inactive_cfg)
+            self._allocate_balance()
+            self.telegram.send_alert(
+                f"🔄 <b>Pair Swap</b>\n"
+                f"Out: {worst_sym} ({worst_vol:.1f}bps)\n"
+                f"In: {best_inactive_sym} ({best_inactive_vol:.1f}bps)"
+            )
+
+    async def _ws_loop(self):
+        delay = self.base_config.reconnect_delay
+        while self._running:
+            try:
+                logger.info(f"MultiPair: Connecting to {self.base_config.ws_url} ...")
+                async with websockets.connect(
+                    self.base_config.ws_url,
+                    ping_interval=20,
+                    ping_timeout=10,
+                    close_timeout=5,
+                ) as ws:
+                    logger.info("MultiPair: WebSocket connected — subscribing to all tickers")
+                    self.telegram.send_alert(
+                        f"✅ <b>WildBot MultiPair Reconnected</b>\n"
+                        f"WebSocket connected, trading up to {self.max_active_pairs} pairs"
+                    )
+                    all_symbols = list(self.scanner.pairs.keys()) if self.scanner else [self.base_config.ws_symbol]
+                    sub_msg = json.dumps({
+                        "method": "subscribe",
+                        "params": {
+                            "channel": "ticker",
+                            "symbol": all_symbols,
+                            "event_trigger": "bbo",
+                        },
+                    })
+                    await ws.send(sub_msg)
+                    delay = self.base_config.reconnect_delay
+                    async for msg in ws:
+                        if not self._running:
+                            break
+                        self._update_count += 1
+                        is_update, bid, ask, bid_qty, ask_qty, symbol = self._parse_depth_update(msg)
+                        if is_update and symbol:
+                            self._handle_tick(symbol, bid, ask, bid_qty, ask_qty)
+            except websockets.exceptions.ConnectionClosed as exc:
+                logger.warning(f"MultiPair: Connection closed: {exc}")
+                self.telegram.send_alert(
+                    f"⚠️ <b>WildBot MultiPair Disconnected</b>\n"
+                    f"WebSocket connection closed: {exc}"
+                )
+            except Exception as exc:
+                logger.error(f"MultiPair: WebSocket error: {exc}")
+                self.telegram.send_alert(
+                    f"⚠️ <b>WildBot MultiPair Disconnected</b>\n"
+                    f"WebSocket error: {exc}"
+                )
+
+            if self._running:
+                for trader in self.active_traders.values():
+                    trader.cancel_all_orders()
+                logger.info(f"MultiPair: Reconnecting in {delay:.1f}s ...")
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, self.base_config.max_reconnect_delay)
+
+    async def _pair_management_loop(self):
+        while self._running:
+            await asyncio.sleep(30)
+            self._maybe_swap_pairs()
+
+            if self.base_config.live_mode and self._kraken:
+                now = time.monotonic()
+                if now - self._last_balance_refresh >= self._balance_refresh_interval:
+                    self._last_balance_refresh = now
+                    self._refresh_live_balance()
+
+    def _initialize_live_balance(self):
+        if not self.base_config.live_mode or not self._kraken:
+            return
+        try:
+            connected = False
+            for attempt in range(7):
+                if attempt > 0:
+                    wait = 15 * (2 ** attempt)
+                    logger.warning(f"Kraken API validation attempt {attempt}/7 failed, retrying in {wait}s...")
+                    time.sleep(wait)
+                if self._kraken.validate_connection():
+                    connected = True
+                    break
+            if not connected:
+                logger.error("LIVE MODE: Kraken API connection failed after 7 attempts — falling back to paper mode")
+                self.base_config.live_mode = False
+                self.telegram.send_alert(
+                    "🚨 <b>WildBot MultiPair LIVE MODE FAILED</b>\n"
+                    "Could not connect to Kraken API.\n"
+                    "Falling back to paper trading mode."
+                )
+                return
+
+            balances = self._kraken.get_balance()
+            logger.info(f"Kraken balance response: {balances}")
+            usd_bal = 0.0
+            for key in ["ZUSD", "USD", "USDT", "ZUSDT", "USDC", "ZUSDC"]:
+                if key in balances and balances[key] > 0:
+                    usd_bal += balances[key]
+                    logger.info(f"Found USD balance in {key}: {balances[key]}")
+
+            try:
+                self._kraken.cancel_all()
+                logger.info("Cancelled any leftover orders on startup")
+            except Exception:
+                pass
+
+            asset_keys_map = {
+                "BTC": ["XXBT", "XBT", "BTC"],
+                "ETH": ["XETH", "ETH"],
+                "SOL": ["SOL"],
+                "DOGE": ["DOGE", "XXDG"],
+                "XRP": ["XXRP", "XRP"],
+                "LINK": ["LINK"],
+                "AVAX": ["AVAX"],
+                "ADA": ["ADA"],
+            }
+            pair_rest_map = {
+                "BTC": "XBTUSDC", "ETH": "ETHUSDC", "SOL": "SOLUSDC",
+                "DOGE": "DOGEUSDC", "XRP": "XRPUSDC", "LINK": "LINKUSDC",
+                "AVAX": "AVAXUSDC", "ADA": "ADAUSDC",
+            }
+            for asset_name, keys in asset_keys_map.items():
+                asset_bal = sum(balances.get(k, 0.0) for k in keys)
+                if asset_bal > 0:
+                    pair_cfg = next((p for p in SCAN_PAIRS if p.display_name == asset_name), None)
+                    min_qty = pair_cfg.min_qty if pair_cfg else 0.0001
+                    if asset_bal >= min_qty:
+                        rest_pair = pair_rest_map.get(asset_name, f"{asset_name}USDC")
+                        logger.warning(f"Stranded {asset_name} detected: {asset_bal} — selling via {rest_pair}")
+                        try:
+                            qty_dec = pair_cfg.qty_decimals if pair_cfg else 8
+                            qty_str = f"{asset_bal:.{qty_dec}f}"
+                            self._kraken.add_order(
+                                pair=rest_pair,
+                                side="sell",
+                                order_type="market",
+                                volume=qty_str,
+                                oflags="",
+                            )
+                            logger.info(f"Sold stranded {asset_name}")
+                            time.sleep(2)
+                            balances = self._kraken.get_balance()
+                            usd_bal = 0.0
+                            for key in ["ZUSD", "USD", "USDT", "ZUSDT", "USDC", "ZUSDC"]:
+                                if key in balances and balances[key] > 0:
+                                    usd_bal += balances[key]
+                        except Exception as e:
+                            logger.warning(f"Failed to sell stranded {asset_name}: {e}")
+
+            self.total_balance = usd_bal
+            self._initial_capital = usd_bal
+            logger.info(f"LIVE MODE MultiPair initialized | Total USD=${usd_bal:,.2f}")
+            self.telegram.send_alert(
+                f"🟢 <b>WildBot MultiPair LIVE MODE ACTIVE</b>\n"
+                f"Exchange: Kraken\n"
+                f"USD Balance: ${usd_bal:,.2f}\n"
+                f"Max Active Pairs: {self.max_active_pairs}\n"
+                f"Per-Pair Allocation: ${(usd_bal * 0.98 / self.max_active_pairs):,.2f}"
+            )
+        except Exception as exc:
+            logger.error(f"LIVE MODE MultiPair initialization failed: {exc} — falling back to paper mode")
+            self.base_config.live_mode = False
+            self.telegram.send_alert(
+                f"🚨 <b>WildBot MultiPair LIVE MODE FAILED</b>\n"
+                f"Error: {exc}\n"
+                f"Falling back to paper trading mode."
+            )
+
+    def _refresh_live_balance(self):
+        if not self._kraken:
+            return
+        try:
+            balances = self._kraken.get_balance()
+            usd_bal = 0.0
+            for key in ["ZUSD", "USD", "USDT", "ZUSDT", "USDC", "ZUSDC"]:
+                if key in balances and balances[key] > 0:
+                    usd_bal += balances[key]
+            old_total = self.total_balance
+            self.total_balance = usd_bal
+            self._allocate_balance()
+            if abs(usd_bal - old_total) > 0.01:
+                logger.info(f"MultiPair balance refreshed: ${old_total:,.2f} → ${usd_bal:,.2f}")
+        except Exception as exc:
+            logger.warning(f"MultiPair balance refresh failed: {exc}")
+
+    async def run(self):
+        self._running = True
+        mode_str = "LIVE" if self.base_config.live_mode else "PAPER"
+        logger.info(
+            f"WildBot MultiPair Orchestrator starting [{mode_str}] | "
+            f"capital=${self.total_balance:.2f} "
+            f"max_pairs={self.max_active_pairs}"
+        )
+
+        self._initialize_live_balance()
+
+        initial_pairs = self._select_pairs()
+        if initial_pairs:
+            for pc in initial_pairs:
+                self._activate_pair(pc)
+            self._allocate_balance()
+            logger.info(f"Initial pairs activated: {[p.ws_symbol for p in initial_pairs]}")
+        else:
+            logger.info("No pairs meet criteria yet — will activate once scanner has data")
+
+        try:
+            await asyncio.gather(
+                self._ws_loop(),
+                self._pair_management_loop(),
+            )
+        except asyncio.CancelledError:
+            logger.info("MultiPair orchestrator cancelled")
+        finally:
+            self.stop()
+
+    def stop(self):
+        self._running = False
+        with self._traders_lock:
+            traders_to_stop = list(self.active_traders.items())
+        for ws_sym, trader in traders_to_stop:
+            trader.cancel_all_orders()
+            logger.info(f"Stopped trader for {ws_sym}")
+        logger.info("MultiPair orchestrator stopped")
+
+    def get_portfolio_status(self) -> dict:
+        with self._traders_lock:
+            traders_snapshot = list(self.active_traders.values())
+        
+        total_balance = 0.0
+        total_equity = 0.0
+        total_pnl = 0.0
+        total_trades = 0
+        total_wins = 0
+        total_losses = 0
+        total_fees = 0.0
+        active_pairs = []
+
+        for trader in traders_snapshot:
+            status = trader.get_status()
+            total_balance += status["balance"]
+            total_equity += status["equity"]
+            total_pnl += status["pnl"] + status["unrealized_pnl"]
+            total_trades += status["trade_count"]
+            total_wins += status["wins"]
+            total_losses += status["losses"]
+            total_fees += status["fees_paid"]
+            active_pairs.append(status)
+
+        unallocated = self.total_balance - total_balance
+        if unallocated > 0:
+            total_balance += unallocated
+            total_equity += unallocated
+
+        return {
+            "total_balance": total_balance,
+            "total_equity": total_equity,
+            "total_pnl": total_pnl,
+            "total_trades": total_trades,
+            "total_wins": total_wins,
+            "total_losses": total_losses,
+            "total_fees": total_fees,
+            "active_pairs": active_pairs,
+            "scanner_data": self.scanner.get_scanner_data() if self.scanner else [],
+            "max_active_pairs": self.max_active_pairs,
+        }

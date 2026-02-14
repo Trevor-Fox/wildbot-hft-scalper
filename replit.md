@@ -1,158 +1,46 @@
-# WildBot HFT Scalper
+# WildBot MultiPair HFT Scalper
 
 ## Overview
-WildBot is a high-frequency trading (HFT) scalping bot that connects to Kraken via WebSocket for real-time order book data. It implements market-making strategies with built-in risk management, multiple trading strategies (microprice, inventory skew, momentum filter), and comprehensive analytics. Features multi-pair volatility scanning across 8 USDC pairs (BTC, ETH, SOL, DOGE, XRP, LINK, AVAX, ADA), dynamically selecting the most volatile tradeable pair and adjusting exit targets based on observed market conditions. Supports both live trading on Kraken and paper trading modes with PnL updates sent to Telegram.
+WildBot is a high-frequency trading (HFT) scalping bot designed for the Kraken exchange. Its primary purpose is to implement market-making strategies with robust risk management across multiple cryptocurrency pairs. The bot focuses on capturing small profits from bid-ask spread differences and dynamically adapting to market conditions. Key capabilities include concurrent multi-pair trading (up to 3 pairs) selected from 8 USDC pairs (BTC, ETH, SOL, DOGE, XRP, LINK, AVAX, ADA), dynamic pair selection based on volatility, and real-time PnL updates. It supports both live trading on Kraken and a paper trading mode for simulation.
 
-## Project Architecture
+## User Preferences
+I prefer to work in an iterative development process, with frequent, small, and reversible changes. When implementing new features or making significant changes, please ask for my approval before proceeding. I prefer clear and concise explanations, avoiding overly technical jargon where simpler terms suffice. Ensure that all critical alerts and daily summaries are delivered via Telegram.
 
-### Files
-- `main.py` — Entry point. Configures the scalper, Flask web server (HTML dashboard on `/`, JSON API on `/api/status`), and runs the async event loop in a background thread. Sets `live_mode=True` for real Kraken trading.
-- `hft_scalper.py` — Core HFT module containing:
-  - `HFTScalper` — Main orchestrator: WebSocket connection, tick processing, order lifecycle, Telegram notifications, EMA/momentum tracking, live balance initialization, pair switching
-  - `TopOfBook` — L1 data structure (best bid/ask, quantities, spread, microprice)
-  - `PairConfig` — Per-pair configuration (ws_symbol, rest_pair, display_name, min_qty, decimals)
-  - `PairScanner` — Multi-pair volatility tracker: scores pairs by vol minus spread penalty, 60s hysteresis, 1.5x switch threshold
-  - `SCAN_PAIRS` — 8 USDC pairs: BTC, ETH, SOL, DOGE, XRP, LINK, AVAX, ADA
-  - `RiskManager` — Position limits, spread filters, stale order detection, affordability checks (live-aware), mark-to-market equity, 50% max drawdown stop, average cost tracking, round-trip PnL, inventory skew pricing, dynamic exit/hold targeting
-  - `OrderManager` — Dual-mode order management: paper (simulated fills) and live (Kraken REST API orders with exponential backoff on errors)
-  - `ScalperConfig` — All tunable parameters including `live_mode`, `rest_pair`, dynamic targeting config
-  - `TelegramNotifier` — Rate-limited notifications, alerts, daily summaries
-- `kraken_client.py` — Kraken REST API client with HMAC-SHA512 authentication for AddOrder, CancelOrder, CancelAll, Balance, OpenOrders, QueryOrders. Includes 1s rate limiting between API calls.
-- `templates/dashboard.html` — Live-updating dark-themed trading dashboard with LIVE/PAPER mode indicator (auto-refreshes every 2s)
+## System Architecture
 
-### Key Features
-1. **Live Trading** — Real order placement on Kraken via REST API with proper authentication
-2. **Paper Trading** — Simulated fills for strategy testing without risk
-3. **WebSocket streaming** — Real-time order book depth via `websockets` library (Kraken v2 API)
-4. **Market making** — Simultaneous limit buy/sell with inventory-skewed pricing
-5. **Microprice** — Volume-weighted fair price from order book for smarter order placement
-6. **Inventory Skew** — Biases prices based on current position to reduce inventory risk
-7. **Momentum Filter** — EMA-based trend detection; skips orders against strong moves
-8. **Risk management** — 500ms stale order cancellation, position limits, spread filter, affordability checks, 50% drawdown auto-stop
-9. **Fill cooldown** — 200ms minimum between fills to prevent cascading; max 1 fill per tick
-10. **Average cost tracking** — Weighted average entry price for accurate unrealized PnL
-11. **Round-trip PnL** — Win/loss counted on complete position round-trips
-12. **Mark-to-market equity** — Balance + position_value for accurate return tracking
-13. **Session statistics** — Win/loss tracking, win rate, peak equity, max drawdown monitoring
-14. **Telegram notifications** — Rate-limited PnL updates (60s), critical alerts (5s cooldown), daily summary
-15. **Trade history** — Last 50 trades stored, last 20 displayed on dashboard
-16. **Live dashboard** — Professional dark-themed HTML dashboard with LIVE/PAPER badge, strategy indicators, trade table, auto-refresh
-17. **Async architecture** — `asyncio` for non-blocking high-speed data processing
-18. **Reconnect logic** — Exponential backoff on disconnection
-19. **API error handling** — Exponential backoff on Kraken API errors (2s → 60s), graceful fallback to paper mode on connection failure
+### UI/UX Decisions
+The project includes a live-updating, dark-themed HTML dashboard for real-time monitoring. It features a clear LIVE/PAPER mode indicator, strategy indicators, a trade table, and a pair scanner table ranking pairs by volatility. The dashboard automatically refreshes every 2 seconds.
 
-### Live Trading Mode
-- Set `live_mode=True` in ScalperConfig to enable real trading
-- Requires `KRAKEN_API_KEY` and `KRAKEN_API_SECRET` environment secrets
-- API key needs "Create & modify orders" and "Query open orders & trades" permissions
-- On startup, fetches real USD and BTC balance from Kraken
-- Places real limit orders via Kraken REST API (`/0/private/AddOrder`)
-- Cancels orders via Kraken REST API (`/0/private/CancelOrder`, `/0/private/CancelAll`)
-- Polls for fills via QueryOrders every 1 second
-- Falls back to paper mode automatically if API connection fails
-- Live mode enforces strict affordability: buys require sufficient USD, sells require BTC position
-- Exponential backoff on API errors prevents rate limit violations
-- REST pair name `XBTUSD` (different from WebSocket `BTC/USD`)
+### Technical Implementations
+The core system is built with Python 3.11 using an `asyncio` architecture for non-blocking, high-speed data processing. It leverages `websockets` for real-time Kraken v2 API data streaming and `requests` for Kraken REST API interactions and Telegram notifications. A Flask web server, deployed with `gunicorn` for production, provides the dashboard and a JSON API for status. Error handling includes exponential backoff for API errors and reconnection logic.
 
-### Configuration (in main.py)
-- `symbol` — Trading pair (default: BTC/USD)
-- `ws_url` — WebSocket endpoint (default: Kraken v2)
-- `ws_symbol` — Exchange-specific symbol for subscription
-- `rest_pair` — REST API pair name (default: XBTUSD)
-- `live_mode` — Enable live trading on Kraken (default: True)
-- `order_qty` — Order size per side (default: 0.001)
-- `max_spread_bps` — Maximum acceptable spread in basis points
-- `stale_order_ms` — Cancel orders older than this (default: 500ms)
-- `max_position` — Maximum net position allowed
-- `starting_capital` — Paper trading capital / overridden by live balance
-- `fill_cooldown_ms` — Minimum time between fills (default: 200ms)
-- `skew_factor` — How aggressively to skew prices for inventory (default: 0.5)
-- `ema_window` — EMA period for momentum detection (default: 50)
-- `momentum_filter_enabled` — Enable/disable momentum filter (default: True)
+### Feature Specifications
+- **Multi-Pair Orchestration:** Manages up to 3 concurrent `PairTrader` instances across 8 USDC pairs, subscribing to all tickers simultaneously. It includes dynamic pair swapping based on volatility and spread, balance allocation, and thread-safe active trader management.
+- **Per-Pair Trading Engine (`PairTrader`):** Each pair operates with isolated state, including its own `ScalperConfig`, `RiskManager`, `OrderManager`, `TopOfBook`, EMA tracking, and volatility tracking. It handles tick processing, fill checking, and various stop mechanisms.
+- **Order Management:** Supports dual-mode operation:
+    - **Paper Trading:** Simulated fills for strategy testing.
+    - **Live Trading:** Real order placement and cancellation on Kraken via REST API with HMAC-SHA512 authentication and 1-second rate limiting per API call. Includes strict affordability checks and automatic fallback to paper mode on API connection failure.
+- **Risk Management:** Incorporates position limits, spread filters, stale order detection (500ms), affordability checks, 50% max drawdown auto-stop, average cost tracking, and dynamic exit/hold targeting.
+- **Dynamic Pair Selection:** A `PairScanner` component tracks volatility and spread for all 8 supported pairs, scoring them and dynamically selecting the most tradeable pairs with a 60-second hysteresis and 1.5x switch threshold.
+- **Asynchronous Architecture:** Utilizes `asyncio` for efficient handling of WebSocket data streams and concurrent operations.
+- **Telegram Integration:** Provides rate-limited (60s) PnL updates, critical alerts (5s cooldown) for events like drawdown stops or disconnections, and daily summaries.
 
-### Web Server
-- Flask serves HTML dashboard on `/` with live-updating stats
-- JSON API on `/api/status` for programmatic access (includes live_mode, trade_history, microprice, ema, momentum)
-- Health check on `/health`
-- Cache-Control: no-cache headers on all responses
-- Production deployment uses gunicorn
-- Scalper runs in a background thread alongside the web server
+### System Design Choices
+- **Market Making Strategy:** Orders are placed around the volume-weighted microprice, with inventory-skewed pricing to manage position risk.
+- **Momentum Filter:** An EMA-based trend detection mechanism prevents trades against strong market moves.
+- **Fill Cooldown:** A 200ms minimum delay between fills prevents rapid, cascading order executions.
+- **Order Placement:** All Kraken orders include the `post_only` flag to ensure maker fees and prevent accidental taker fills.
+- **Web Server:** A Flask application serves a dashboard and API, running in a background thread alongside the scalper.
 
-### Trading Strategies
-1. **Microprice-centered market making**: Orders placed around the volume-weighted microprice rather than simple mid-price
-2. **Inventory skew**: When holding a position, prices shift to encourage inventory reduction (long → sell cheaper, short → buy cheaper)
-3. **Momentum filter**: When EMA detects upward momentum, skip sell orders; when downward, skip buy orders
-4. **Fill cooldown**: 200ms minimum between fills prevents rapid cascade fills that distort PnL
-
-### Telegram Integration
-- `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` stored as Replit Secrets
-- Rate-limited notifications (60s minimum between updates)
-- Alert messages have 5s rate limit
-- Critical alerts: drawdown stops, disconnections, live mode activation/failure
-- Daily summary message sent once per UTC day
-
-## Tech Stack
-- Python 3.11
-- websockets (async WebSocket client)
-- asyncio (concurrency)
-- Flask + gunicorn (web server / deployment)
-- requests (Kraken REST API + Telegram API)
-
-## Environment Secrets
-- `KRAKEN_API_KEY` — Kraken API public key (required for live mode)
-- `KRAKEN_API_SECRET` — Kraken API private key (required for live mode)
-- `TELEGRAM_BOT_TOKEN` — Telegram bot token for notifications
-- `TELEGRAM_CHAT_ID` — Telegram chat ID for notifications
-- `SESSION_SECRET` — Flask session secret
-
-## Recent Changes
-- 2026-02-13: Strategy aggression overhaul: decoupled exit target from fee calculation with new target_exit_bps=8 (was 36bps min_edge). Exits now $55 away instead of $248
-- 2026-02-13: Force exits (time stop, stop loss) now use taker orders (no post_only) with 1bps through BBO for guaranteed fills
-- 2026-02-13: Aggressive timing: stale_order_ms 10s→2s, base_hold 300s→60s, fill_cooldown 200→100ms, stop_loss 20→12bps
-- 2026-02-13: Faster pair switching: 60s→20s cooldown, 1.5x→1.2x vol threshold, check every 50 ticks
-- 2026-02-13: Lowered volatility gate from 0.5bps to 0.1bps for more trading opportunities
-- 2026-02-13: Multi-pair volatility scanner: WebSocket subscribes to 8 USDC pairs (BTC, ETH, SOL, DOGE, XRP, LINK, AVAX, ADA) simultaneously, tracks per-pair volatility/spread/liquidity
-- 2026-02-13: PairScanner class with intelligent pair selection: scores by vol minus spread penalty, 20s hysteresis, 1.2x switch threshold
-- 2026-02-13: Dynamic exit targets: exit_bps = max(target_exit_bps, volatility * 0.8), allowing wider targets on volatile pairs
-- 2026-02-13: Dynamic hold times: scales from 5s to 120s based on exit distance
-- 2026-02-13: Dashboard pair scanner table showing all pairs ranked by volatility, active pair highlighted
-- 2026-02-13: Safe pair switching: only when flat, cancels orders, resets indicators, copies TOB from scanner
-- 2026-02-13: Major pricing overhaul: orders now placed at BBO (best bid/ask) instead of 20bps away. Previous 20bps entry offset placed orders $137 from market — virtually unfillable. Now joins the spread for realistic fills.
-- 2026-02-13: Added post_only flag (oflags=post) to all Kraken orders — guarantees maker fee and prevents accidental taker fills
-- 2026-02-13: Lowered volatility gate from 3bps to 0.5bps — observed vol is typically 0.02-0.7bps, previous gate blocked all trading
-- 2026-02-13: Added status reason tracking — bot reports WHY it's not trading (volatility_low, spread_wide, drawdown_stopped, etc.)
-- 2026-02-13: Dashboard now shows status reason bar with color coding, spread analysis (current vs min edge), fee info per side
-- 2026-02-13: Suppressed werkzeug access logs (set to WARNING) — eliminated 1-per-second log spam from dashboard polling
-- 2026-02-13: Reduced dashboard poll frequency from 2s to 5s
-- 2026-02-13: Added spread_bps, min_edge_bps, fee_bps, status_reason to /api/status endpoint
-- 2026-02-13: Fixed BTC dust threshold: raised from 1e-12 to order_qty/10 (0.00001 BTC) to prevent Kraken "Insufficient funds" errors from residual dust. Added _dust_qty property, filtered dust at source in balance initialization
-- 2026-02-13: Lowered volatility gate from 20bps to 3bps — 20bps was unrealistic for 100-tick (~10s) rolling window
-- 2026-02-13: Added volatility gate: bot only enters new positions when rolling price volatility > 0.5bps, preventing entries in dead markets
-- 2026-02-13: Widened entry offset from 2bps to 20bps (maker_fee + profit) so exit target is only 16bps further instead of 34bps
-- 2026-02-13: Added time-based stop-loss: force-exits positions held > 120s without reaching target
-- 2026-02-13: Added price stop-loss: force-exits when adverse move > 20bps to limit downside
-- 2026-02-13: Fixed exit offset to cover BOTH sides' maker fees: 2×16bps + 4bps profit = 36bps (~$239 on BTC). Previous 20bps offset only covered one side, causing guaranteed losses per round trip
-- 2026-02-13: Fixed position churn: when long, only sell orders are placed (no buys); when short, only buy orders. Prevents the bot from adding to positions while trying to exit, which was generating massive fee losses
-- 2026-02-12: Tightened exit offset from 2x maker fee (33bps/$216) to 1x maker fee + profit (20bps/$131) for faster trade completion
-- 2026-02-12: Increased API rate limit from 200ms to 1s between calls to prevent Kraken rate limiting
-- 2026-02-12: Increased fill poll interval from 1s to 5s and balance refresh from 60s to 300s to reduce API load
-- 2026-02-12: Set up VM deployment for 24/7 operation (bot no longer sleeps when Replit is inactive)
-- 2026-02-12: Fee-aware pricing: buy/sell prices offset by maker fee (16bps) + profit target (4bps) to ensure round trips are profitable after Kraken fees
-- 2026-02-12: Fee tracking in record_fill: deducts estimated maker fee from balance/pnl, tracks total fees_paid, includes fees in trip_cost for accurate win/loss
-- 2026-02-12: Increased stale_order_ms to 5000 (from 500) and max_spread_bps to 50 to accommodate wider fee-aware quotes
-- 2026-02-12: Enhanced Telegram messages: fill alerts with fee info, periodic updates with fees paid, LIVE/PAPER mode indicators, total PnL breakdown
-- 2026-02-12: Implemented live trading via Kraken REST API (AddOrder, CancelOrder, CancelAll, QueryOrders)
-- 2026-02-12: Created kraken_client.py with HMAC-SHA512 authentication and rate limiting
-- 2026-02-12: Added live_mode toggle with automatic fallback to paper on API failure
-- 2026-02-12: Live balance initialization from Kraken (USD + BTC)
-- 2026-02-12: Added exponential backoff on API errors (2s → 60s)
-- 2026-02-12: Live-aware affordability checks (buys need USD, sells need BTC position)
-- 2026-02-12: Dashboard shows LIVE/PAPER mode badge
-- 2026-02-12: Telegram alerts for live mode activation/failure
-- 2026-02-12: Fixed position-crossing logic for correct round-trip PnL on long↔short flips
-- 2026-02-12: Fixed equity calculation bug (use position_value, not unrealized profit)
-- 2026-02-12: Fixed drawdown alert spam (one-shot flag + 5s rate limit on send_alert)
-- 2026-02-12: Added Microprice, Inventory Skew, Momentum Filter strategies
-- 2026-02-12: Added fill cooldown (200ms), average cost tracking, round-trip PnL tracking
-- 2026-02-12: Built professional HTML live dashboard with dark theme
-- 2026-02-12: Initial creation of HFT scalper module
+## External Dependencies
+- **Kraken Exchange:**
+    - **WebSocket API (v2):** Used for real-time ticker data and order book depth streaming.
+    - **REST API:** Used for placing/cancelling orders, querying balances, open orders, and trades. Requires `KRAKEN_API_KEY` and `KRAKEN_API_SECRET`.
+- **Telegram:**
+    - **Bot API:** Used for sending notifications, alerts, and daily summaries. Requires `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`.
+- **Python Libraries:**
+    - `websockets`: Asynchronous WebSocket client.
+    - `asyncio`: Asynchronous I/O framework.
+    - `Flask`: Web framework for the dashboard and API.
+    - `gunicorn`: WSGI HTTP Server for production deployment of Flask.
+    - `requests`: HTTP library for interacting with REST APIs.

@@ -8,7 +8,7 @@ import threading
 import time
 
 from flask import Flask, jsonify, render_template
-from hft_scalper import HFTScalper, ScalperConfig, PairScanner, SCAN_PAIRS
+from hft_scalper import MultiPairOrchestrator, ScalperConfig, PairScanner, SCAN_PAIRS
 from kraken_client import KrakenClient
 
 logging.getLogger("werkzeug").setLevel(logging.WARNING)
@@ -64,15 +64,19 @@ config = ScalperConfig(
 
 kraken = KrakenClient()
 scanner = PairScanner(SCAN_PAIRS)
-scanner._active_pair = config.ws_symbol
-scalper = HFTScalper(config, kraken_client=kraken, scanner=scanner)
+orchestrator = MultiPairOrchestrator(
+    base_config=config,
+    kraken_client=kraken,
+    scanner=scanner,
+    max_active_pairs=3,
+)
 
 
 def run_scalper():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
-        loop.run_until_complete(scalper.run())
+        loop.run_until_complete(orchestrator.run())
     finally:
         loop.close()
 
@@ -90,49 +94,46 @@ def dashboard():
 
 @app.route("/api/status")
 def api_status():
-    mid = scalper.tob.mid_price
+    portfolio = orchestrator.get_portfolio_status()
+    total_wins = portfolio["total_wins"]
+    total_losses = portfolio["total_losses"]
+    total_trades = portfolio["total_trades"]
+    win_rate = (total_wins / (total_wins + total_losses) * 100) if (total_wins + total_losses) > 0 else 0.0
+    
+    starting_cap = orchestrator._initial_capital
+    total_equity = portfolio["total_equity"]
+    return_pct = ((total_equity - starting_cap) / starting_cap * 100) if starting_cap > 0 else 0.0
+    
+    all_trade_history = []
+    with orchestrator._traders_lock:
+        traders_snapshot = list(orchestrator.active_traders.values())
+    for trader in traders_snapshot:
+        for t in trader._trade_history[-20:]:
+            entry = dict(t)
+            entry["symbol"] = trader.config.symbol
+            all_trade_history.append(entry)
+    all_trade_history.extend([dict(t) for t in orchestrator._trade_history[-20:]])
+    all_trade_history.sort(key=lambda x: x.get("time", 0), reverse=True)
+    all_trade_history = all_trade_history[:30]
+    
     return jsonify({
-        "status": "running" if scalper._running else "stopped",
-        "live_mode": scalper.config.live_mode,
-        "symbol": scalper.config.symbol,
-        "starting_capital": scalper.risk.starting_capital,
-        "balance": round(scalper.risk.balance, 2),
-        "equity": round(scalper.risk.equity(mid), 2),
-        "unrealized_pnl": round(scalper.risk.unrealized_pnl(mid), 4),
-        "return_pct": round(scalper.risk.return_pct(mid), 2),
-        "position": scalper.risk.position,
-        "pnl": round(scalper.risk.pnl, 4),
-        "trade_count": scalper.risk.trade_count,
-        "wins": scalper.risk.wins,
-        "losses": scalper.risk.losses,
-        "win_rate": round(scalper.risk.win_rate, 2),
-        "fees_paid": round(scalper.risk.fees_paid, 4),
-        "max_drawdown_pct": round(scalper.risk.max_drawdown_pct_seen, 2),
-        "is_stopped": scalper.risk.is_stopped,
-        "open_orders": scalper.orders.open_count,
-        "avg_entry_price": round(scalper.risk.avg_entry_price, 2),
-        "tob": {
-            "best_bid": scalper.tob.best_bid,
-            "best_ask": scalper.tob.best_ask,
-            "spread": scalper.tob.spread,
-            "mid_price": scalper.tob.mid_price,
-            "microprice": scalper.tob.microprice,
-        },
-        "ema": round(scalper._ema, 2),
-        "volatility_bps": round(scalper._volatility_bps, 2),
-        "momentum": scalper.momentum_signal,
-        "trade_history": scalper._trade_history[-20:],
-        "updates_processed": scalper._update_count,
+        "status": "running" if orchestrator._running else "stopped",
+        "live_mode": orchestrator.base_config.live_mode,
+        "multi_pair": True,
+        "max_active_pairs": orchestrator.max_active_pairs,
+        "total_balance": round(portfolio["total_balance"], 2),
+        "total_equity": round(portfolio["total_equity"], 2),
+        "total_pnl": round(portfolio["total_pnl"], 4),
+        "total_trades": total_trades,
+        "total_wins": total_wins,
+        "total_losses": total_losses,
+        "total_fees": round(portfolio["total_fees"], 4),
+        "win_rate": round(win_rate, 2),
+        "return_pct": round(return_pct, 2),
+        "active_pairs": portfolio["active_pairs"],
+        "scanner_data": portfolio["scanner_data"],
+        "trade_history": all_trade_history,
         "uptime": round(time.time() - start_time, 1),
-        "status_reason": scalper._status_reason,
-        "spread_bps": round((scalper.tob.spread / scalper.tob.mid_price * 10000) if scalper.tob.mid_price > 0 else 0, 2),
-        "target_exit_bps": config.target_exit_bps,
-        "min_edge_bps": round(scalper.risk.dynamic_exit_bps(scalper._volatility_bps), 2),
-        "fee_bps": config.maker_fee_bps,
-        "scanner_data": scalper.scanner.get_scanner_data() if scalper.scanner else [],
-        "active_pair": scalper.config.ws_symbol,
-        "dynamic_exit_bps": round(scalper.risk.dynamic_exit_bps(scalper._volatility_bps), 2),
-        "dynamic_hold_seconds": round(scalper.risk.dynamic_hold_seconds(scalper.risk.dynamic_exit_bps(scalper._volatility_bps)), 1),
     })
 
 

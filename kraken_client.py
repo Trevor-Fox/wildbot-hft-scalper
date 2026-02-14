@@ -5,6 +5,7 @@ import hmac
 import base64
 import urllib.parse
 import logging
+import threading
 
 import requests
 
@@ -23,6 +24,7 @@ class KrakenClient:
         self.api_secret = api_secret or os.environ.get("KRAKEN_API_SECRET", "")
         self._last_request_time: float = 0.0
         self._session = requests.Session()
+        self._lock = threading.Lock()
         if not self.api_key or not self.api_secret:
             logger.warning("Kraken API key or secret not configured")
 
@@ -42,39 +44,40 @@ class KrakenClient:
         }
 
     def _private_request(self, endpoint: str, data: dict = None) -> dict:
-        if data is None:
-            data = {}
+        with self._lock:
+            if data is None:
+                data = {}
 
-        now = time.time()
-        elapsed = now - self._last_request_time
-        if elapsed < 1.0:
-            time.sleep(1.0 - elapsed)
+            now = time.time()
+            elapsed = now - self._last_request_time
+            if elapsed < 1.0:
+                time.sleep(1.0 - elapsed)
 
-        data["nonce"] = int(time.time() * 1000)
-        urlpath = f"/0/private/{endpoint}"
-        url = f"{self.BASE_URL}{urlpath}"
-        headers = self._sign(urlpath, data)
+            data["nonce"] = int(time.time() * 1000)
+            urlpath = f"/0/private/{endpoint}"
+            url = f"{self.BASE_URL}{urlpath}"
+            headers = self._sign(urlpath, data)
 
-        logger.debug("POST %s data=%s", urlpath, data)
+            logger.debug("POST %s data=%s", urlpath, data)
 
-        try:
-            resp = self._session.post(url, data=data, headers=headers, timeout=15)
-            self._last_request_time = time.time()
-            resp.raise_for_status()
-            result = resp.json()
-        except requests.RequestException as exc:
-            logger.warning("Request failed for %s: %s", endpoint, exc)
-            raise KrakenAPIError(f"Request failed: {exc}") from exc
+            try:
+                resp = self._session.post(url, data=data, headers=headers, timeout=15)
+                self._last_request_time = time.time()
+                resp.raise_for_status()
+                result = resp.json()
+            except requests.RequestException as exc:
+                logger.warning("Request failed for %s: %s", endpoint, exc)
+                raise KrakenAPIError(f"Request failed: {exc}") from exc
 
-        logger.debug("Response %s: %s", endpoint, result)
+            logger.debug("Response %s: %s", endpoint, result)
 
-        errors = result.get("error", [])
-        if errors:
-            error_msg = "; ".join(errors)
-            logger.warning("Kraken API error on %s: %s", endpoint, error_msg)
-            raise KrakenAPIError(error_msg)
+            errors = result.get("error", [])
+            if errors:
+                error_msg = "; ".join(errors)
+                logger.warning("Kraken API error on %s: %s", endpoint, error_msg)
+                raise KrakenAPIError(error_msg)
 
-        return result.get("result", {})
+            return result.get("result", {})
 
     def get_balance(self) -> dict:
         try:
