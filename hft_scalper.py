@@ -1443,6 +1443,7 @@ class PairTrader:
         self._last_force_exit_time: float = 0.0
         self._force_exit_order_time: float = 0.0
         self._allocated_balance: float = allocated_balance
+        self._qty_sized: bool = False
         self._tick_lock = threading.Lock()
 
     @property
@@ -1454,6 +1455,7 @@ class PairTrader:
         self._allocated_balance = value
         self.risk.balance = value
         self.risk.starting_capital = value
+        self._qty_sized = False
 
     @property
     def momentum_signal(self) -> str:
@@ -1501,9 +1503,27 @@ class PairTrader:
         finally:
             self._tick_lock.release()
 
+    def _compute_order_qty(self):
+        mid = self.tob.mid_price
+        if mid <= 0:
+            return
+        target_notional = self._allocated_balance * 0.80
+        raw_qty = target_notional / mid
+        min_qty = self.pair_config.min_qty
+        order_qty = max(min_qty, (raw_qty // min_qty) * min_qty)
+        order_qty = round(order_qty, self.pair_config.qty_decimals)
+        self.config.order_qty = order_qty
+        self.config.max_position = order_qty
+        self.risk._dust_qty = min_qty / 10
+        logger.info(f"[{self.config.symbol}] Sized order: {order_qty} units (~${order_qty * mid:.2f} notional) at mid=${mid:.4f}")
+
     def _handle_tick_inner(self):
         self._update_count += 1
         self._update_ema()
+
+        if not self._qty_sized and self.tob.mid_price > 0:
+            self._compute_order_qty()
+            self._qty_sized = True
 
         if self.config.live_mode:
             now = time.monotonic()
