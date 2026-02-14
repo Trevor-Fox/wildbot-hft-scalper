@@ -62,17 +62,22 @@ config = ScalperConfig(
     requote_threshold_bps=15.0,
 )
 
-kraken = KrakenClient()
-scanner = PairScanner(SCAN_PAIRS)
-orchestrator = MultiPairOrchestrator(
-    base_config=config,
-    kraken_client=kraken,
-    scanner=scanner,
-    max_active_pairs=3,
-)
+orchestrator = None
+start_time = time.time()
+bot_ready = False
 
 
 def run_scalper():
+    global orchestrator, bot_ready
+    kraken = KrakenClient()
+    scanner = PairScanner(SCAN_PAIRS)
+    orchestrator = MultiPairOrchestrator(
+        base_config=config,
+        kraken_client=kraken,
+        scanner=scanner,
+        max_active_pairs=3,
+    )
+    bot_ready = True
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
@@ -89,21 +94,44 @@ def add_cache_headers(response):
 
 @app.route("/")
 def dashboard():
+    if not bot_ready:
+        return "<h1>WildBot starting up...</h1><meta http-equiv='refresh' content='3'>", 200
     return render_template("dashboard.html")
 
 
 @app.route("/api/status")
 def api_status():
+    if not bot_ready or orchestrator is None:
+        return jsonify({
+            "status": "starting",
+            "live_mode": config.live_mode,
+            "multi_pair": True,
+            "max_active_pairs": 3,
+            "total_balance": 0,
+            "total_equity": 0,
+            "total_pnl": 0,
+            "total_trades": 0,
+            "total_wins": 0,
+            "total_losses": 0,
+            "total_fees": 0,
+            "win_rate": 0,
+            "return_pct": 0,
+            "active_pairs": [],
+            "scanner_data": [],
+            "trade_history": [],
+            "uptime": round(time.time() - start_time, 1),
+        })
+
     portfolio = orchestrator.get_portfolio_status()
     total_wins = portfolio["total_wins"]
     total_losses = portfolio["total_losses"]
     total_trades = portfolio["total_trades"]
     win_rate = (total_wins / (total_wins + total_losses) * 100) if (total_wins + total_losses) > 0 else 0.0
-    
+
     starting_cap = orchestrator._initial_capital
     total_equity = portfolio["total_equity"]
     return_pct = ((total_equity - starting_cap) / starting_cap * 100) if starting_cap > 0 else 0.0
-    
+
     all_trade_history = []
     with orchestrator._traders_lock:
         traders_snapshot = list(orchestrator.active_traders.values())
@@ -115,7 +143,7 @@ def api_status():
     all_trade_history.extend([dict(t) for t in orchestrator._trade_history[-20:]])
     all_trade_history.sort(key=lambda x: x.get("time", 0), reverse=True)
     all_trade_history = all_trade_history[:30]
-    
+
     return jsonify({
         "status": "running" if orchestrator._running else "stopped",
         "live_mode": orchestrator.base_config.live_mode,
@@ -143,7 +171,6 @@ def health():
     return "ok", 200
 
 
-start_time = time.time()
 scalper_thread = threading.Thread(target=run_scalper, daemon=True)
 scalper_thread.start()
 
