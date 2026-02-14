@@ -1962,6 +1962,7 @@ class MultiPairOrchestrator:
                 f"for {best_inactive_sym} (vol={best_inactive_vol:.1f}bps)"
             )
             self._deactivate_pair(worst_sym)
+            time.sleep(2)
             self._activate_pair(best_inactive_cfg)
             self._allocate_balance()
             self.telegram.send_alert(

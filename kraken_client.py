@@ -25,6 +25,8 @@ class KrakenClient:
         self._last_request_time: float = 0.0
         self._session = requests.Session()
         self._lock = threading.Lock()
+        self._nonce_counter: int = 0
+        self._last_nonce: int = 0
         if not self.api_key or not self.api_secret:
             logger.warning("Kraken API key or secret not configured")
 
@@ -53,7 +55,11 @@ class KrakenClient:
             if elapsed < 1.0:
                 time.sleep(1.0 - elapsed)
 
-            data["nonce"] = int(time.time() * 1000)
+            nonce = int(time.time() * 1_000_000)
+            if nonce <= self._last_nonce:
+                nonce = self._last_nonce + 1
+            self._last_nonce = nonce
+            data["nonce"] = nonce
             urlpath = f"/0/private/{endpoint}"
             url = f"{self.BASE_URL}{urlpath}"
             headers = self._sign(urlpath, data)
