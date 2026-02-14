@@ -111,14 +111,14 @@ class PairConfig:
 
 
 SCAN_PAIRS = [
-    PairConfig("BTC/USDC", "XBTUSDC", "BTC", 0.0001, 1, 8),
-    PairConfig("ETH/USDC", "ETHUSDC", "ETH", 0.01, 2, 8),
-    PairConfig("SOL/USDC", "SOLUSDC", "SOL", 0.25, 4, 8),
-    PairConfig("DOGE/USDC", "DOGEUSDC", "DOGE", 50.0, 5, 2),
-    PairConfig("XRP/USDC", "XRPUSDC", "XRP", 10.0, 5, 2),
-    PairConfig("LINK/USDC", "LINKUSDC", "LINK", 0.2, 4, 8),
-    PairConfig("AVAX/USDC", "AVAXUSDC", "AVAX", 0.1, 4, 8),
-    PairConfig("ADA/USDC", "ADAUSDC", "ADA", 10.0, 6, 2),
+    PairConfig("BTC/USDC", "XBTUSDC", "BTC", 0.00005, 2, 8),
+    PairConfig("ETH/USDC", "ETHUSDC", "ETH", 0.001, 2, 8),
+    PairConfig("SOL/USDC", "SOLUSDC", "SOL", 0.02, 2, 8),
+    PairConfig("DOGE/USDC", "DOGEUSDC", "DOGE", 13.0, 5, 8),
+    PairConfig("XRP/USDC", "XRPUSDC", "XRP", 1.65, 5, 8),
+    PairConfig("LINK/USDC", "LINKUSDC", "LINK", 0.2, 5, 8),
+    PairConfig("AVAX/USDC", "AVAXUSDC", "AVAX", 0.1, 2, 8),
+    PairConfig("ADA/USDC", "ADAUSDC", "ADA", 4.4, 6, 8),
 ]
 
 
