@@ -32,7 +32,7 @@ outputType = "webview"
 
 [deployment]
 deploymentTarget = "vm"
-run = ["python", "main.py"]
+run = ["gunicorn", "main:app", "-b", "0.0.0.0:5000", "-w", "1", "--threads", "4", "--timeout", "120"]
 
 [[ports]]
 localPort = 5000
