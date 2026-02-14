@@ -1,11 +1,11 @@
 import logging
 import os
-import subprocess
-import sys
+import socket
 import threading
 import time
 
 from flask import Flask, jsonify, render_template
+import werkzeug.serving
 
 logging.getLogger("werkzeug").setLevel(logging.WARNING)
 
@@ -173,5 +173,19 @@ def _delayed_scalper_start():
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
+    import subprocess
+    try:
+        result = subprocess.run(["fuser", f"{port}/tcp"], capture_output=True, text=True, timeout=3)
+        if result.stdout.strip():
+            subprocess.run(["fuser", "-k", "-9", f"{port}/tcp"], capture_output=True, timeout=3)
+            time.sleep(0.5)
+    except Exception:
+        pass
+    original_make_server = werkzeug.serving.make_server
+    def patched_make_server(*args, **kwargs):
+        server = original_make_server(*args, **kwargs)
+        server.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        return server
+    werkzeug.serving.make_server = patched_make_server
     threading.Thread(target=_delayed_scalper_start, daemon=True).start()
     app.run(host="0.0.0.0", port=port, threaded=True)
