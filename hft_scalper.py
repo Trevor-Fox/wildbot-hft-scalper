@@ -449,11 +449,13 @@ class RiskManager:
         )
 
     def dynamic_exit_bps(self, volatility_bps: float) -> float:
+        fee_floor = (self.config.maker_fee_bps * 2) + self.config.min_profit_bps
         vol_target = volatility_bps * self.config.volatility_exit_multiplier
-        return max(self.config.target_exit_bps, vol_target)
+        return max(fee_floor, vol_target)
 
     def dynamic_hold_seconds(self, exit_bps: float) -> float:
-        ratio = exit_bps / self.config.target_exit_bps if self.config.target_exit_bps > 0 else 1.0
+        fee_floor = (self.config.maker_fee_bps * 2) + self.config.min_profit_bps
+        ratio = exit_bps / fee_floor if fee_floor > 0 else 1.0
         hold = self.config.base_hold_seconds * ratio
         return max(self.config.min_hold_seconds, min(hold, self.config.base_hold_seconds * self.config.max_hold_scaling))
 
@@ -595,7 +597,7 @@ class OrderManager:
             self._consecutive_errors += 1
             self._last_error_time = now
             self._error_backoff = min(60.0, 2.0 * (2 ** self._consecutive_errors))
-            logger.warning(f"LIVE order failed ({self._consecutive_errors}x, backoff={self._error_backoff:.0f}s): {exc}")
+            logger.warning(f"LIVE order failed [{self._rest_pair} {side.value}] ({self._consecutive_errors}x, backoff={self._error_backoff:.0f}s): {exc}")
             if "Insufficient funds" in str(exc):
                 self._needs_balance_sync = True
             return None
@@ -1788,7 +1790,8 @@ class PairTrader:
             and self.risk.can_place_sell()
             and self.orders.open_count < self.config.max_open_orders
         ):
-            self.orders.create_order(OrderSide.SELL, sell_price, self.config.order_qty)
+            sell_qty = abs(self.risk.position) if abs(self.risk.position) > self.risk._dust_qty else self.config.order_qty
+            self.orders.create_order(OrderSide.SELL, sell_price, sell_qty)
 
         if self._update_count % 50 == 0:
             mid = self.tob.mid_price
@@ -1860,12 +1863,21 @@ class MultiPairOrchestrator:
     def _allocate_balance(self):
         with self._traders_lock:
             usable = self.total_balance * 0.98
-            per_pair = usable / self.max_active_pairs
+            position_value = 0.0
             for trader in self.active_traders.values():
-                trader.risk.balance = per_pair
-                trader.risk.starting_capital = per_pair
-                trader.risk.peak_equity = max(trader.risk.peak_equity, per_pair)
-                trader._allocated_balance = per_pair
+                if abs(trader.risk.position) > trader.risk._dust_qty:
+                    position_value += trader.risk.equity(trader.tob.mid_price)
+            free_cash = max(0, usable - position_value)
+            flat_count = sum(1 for t in self.active_traders.values() if abs(t.risk.position) <= t.risk._dust_qty)
+            if flat_count == 0:
+                return
+            per_flat = free_cash / flat_count
+            for trader in self.active_traders.values():
+                if abs(trader.risk.position) <= trader.risk._dust_qty:
+                    trader.risk.balance = per_flat
+                    trader.risk.starting_capital = per_flat
+                    trader.risk.peak_equity = per_flat
+                    trader._allocated_balance = per_flat
 
     def _select_pairs(self) -> list[PairConfig]:
         if not self.scanner:
@@ -1910,6 +1922,7 @@ class MultiPairOrchestrator:
         with self._traders_lock:
             self.active_traders[pair_config.ws_symbol] = trader
         logger.info(f"ACTIVATED pair {pair_config.ws_symbol} with ${per_pair_balance:.2f} allocated")
+        trader._activation_time = time.monotonic()
 
     def _deactivate_pair(self, ws_symbol: str):
         with self._traders_lock:
@@ -1982,8 +1995,11 @@ class MultiPairOrchestrator:
             return
 
         flat_traders = []
+        now_mono = time.monotonic()
         for ws_sym, trader in self.active_traders.items():
             if trader.is_flat():
+                if hasattr(trader, '_activation_time') and (now_mono - trader._activation_time) < 300:
+                    continue
                 vol = self.scanner._volatilities.get(ws_sym, 0.0)
                 flat_traders.append((ws_sym, vol))
 
@@ -2013,7 +2029,7 @@ class MultiPairOrchestrator:
                 best_inactive_sym = ws_sym
                 best_inactive_cfg = pair_cfg
 
-        if best_inactive_cfg and best_inactive_vol > worst_vol * 1.5:
+        if best_inactive_cfg and best_inactive_vol > worst_vol * 2.5:
             logger.info(
                 f"SWAP: deactivating {worst_sym} (vol={worst_vol:.1f}bps) "
                 f"for {best_inactive_sym} (vol={best_inactive_vol:.1f}bps)"
@@ -2087,7 +2103,7 @@ class MultiPairOrchestrator:
         await asyncio.sleep(30)
         self._maybe_swap_pairs()
         while self._running:
-            await asyncio.sleep(120)
+            await asyncio.sleep(300)
             self._maybe_swap_pairs()
 
             if self.base_config.live_mode and self._kraken:
@@ -2209,11 +2225,17 @@ class MultiPairOrchestrator:
             for key in ["ZUSD", "USD", "USDT", "ZUSDT", "USDC", "ZUSDC"]:
                 if key in balances and balances[key] > 0:
                     usd_bal += balances[key]
+            crypto_value = 0.0
+            with self._traders_lock:
+                for trader in self.active_traders.values():
+                    if abs(trader.risk.position) > trader.risk._dust_qty:
+                        crypto_value += abs(trader.risk.position) * trader.tob.mid_price
             old_total = self.total_balance
-            self.total_balance = usd_bal
+            self.total_balance = usd_bal + crypto_value
             self._allocate_balance()
-            if abs(usd_bal - old_total) > 0.01:
-                logger.info(f"MultiPair balance refreshed: ${old_total:,.2f} → ${usd_bal:,.2f}")
+            new_total = usd_bal + crypto_value
+            if abs(new_total - old_total) > 0.01:
+                logger.info(f"MultiPair balance refreshed: ${old_total:,.2f} → ${new_total:,.2f} (USDC=${usd_bal:,.2f} + crypto=${crypto_value:,.2f})")
         except Exception as exc:
             logger.warning(f"MultiPair balance refresh failed: {exc}")
 

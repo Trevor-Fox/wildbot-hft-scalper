@@ -24,9 +24,10 @@ class KrakenClient:
         self.api_secret = api_secret or os.environ.get("KRAKEN_API_SECRET", "")
         self._last_request_time: float = 0.0
         self._session = requests.Session()
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._nonce_counter: int = 0
         self._last_nonce: int = 0
+        self._nonce_lock = threading.Lock()
         if not self.api_key or not self.api_secret:
             logger.warning("Kraken API key or secret not configured")
 
@@ -45,7 +46,7 @@ class KrakenClient:
             "API-Sign": sigdigest,
         }
 
-    def _private_request(self, endpoint: str, data: dict = None) -> dict:
+    def _private_request(self, endpoint: str, data: dict = None, _retry: int = 0) -> dict:
         with self._lock:
             if data is None:
                 data = {}
@@ -55,11 +56,12 @@ class KrakenClient:
             if elapsed < 1.0:
                 time.sleep(1.0 - elapsed)
 
-            nonce = int(time.time() * 1_000_000)
-            if nonce <= self._last_nonce:
-                nonce = self._last_nonce + 1
-            self._last_nonce = nonce
-            data["nonce"] = nonce
+            with self._nonce_lock:
+                nonce = int(time.time() * 1_000_000_000)
+                if nonce <= self._last_nonce:
+                    nonce = self._last_nonce + 1
+                self._last_nonce = nonce
+                data["nonce"] = nonce
             urlpath = f"/0/private/{endpoint}"
             url = f"{self.BASE_URL}{urlpath}"
             headers = self._sign(urlpath, data)
@@ -80,6 +82,11 @@ class KrakenClient:
             errors = result.get("error", [])
             if errors:
                 error_msg = "; ".join(errors)
+                if "Invalid nonce" in error_msg and _retry < 2:
+                    logger.info("Nonce error on %s, retrying (%d)...", endpoint, _retry + 1)
+                    time.sleep(0.5)
+                    self._last_request_time = 0.0
+                    return self._private_request(endpoint, data, _retry=_retry + 1)
                 logger.warning("Kraken API error on %s: %s", endpoint, error_msg)
                 raise KrakenAPIError(error_msg)
 
