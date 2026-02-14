@@ -749,6 +749,7 @@ class HFTScalper:
         self._live_balance_deferred: bool = False
         self._status_reason: str = "initializing"
         self._last_force_exit_time: float = 0.0
+        self._force_exit_order_time: float = 0.0
 
     @property
     def momentum_signal(self) -> str:
@@ -896,6 +897,8 @@ class HFTScalper:
             filled = self.orders.simulate_fill_check(self.tob)
         for order in filled:
             self.risk.record_fill(order.side, order.price, order.quantity)
+            if abs(self.risk.position) < self.risk._dust_qty:
+                self._force_exit_order_time = 0.0
             mid = self.tob.mid_price
             self._trade_history.append({
                 "time": time.time(),
@@ -947,26 +950,31 @@ class HFTScalper:
             return
 
         now_mono = time.monotonic()
-        force_exit_cooldown = 5.0
+        reprice_after = 30.0
         if abs(self.risk.position) > self.risk._dust_qty and self.risk._position_entry_time > 0:
             hold_time = now_mono - self.risk._position_entry_time
             dynamic_hold = self.risk.dynamic_hold_seconds(self.risk.dynamic_exit_bps(self._volatility_bps))
             if hold_time > dynamic_hold:
-                if (now_mono - self._last_force_exit_time) > force_exit_cooldown:
-                    self._last_force_exit_time = now_mono
-                    self.orders.cancel_all()
-                    exit_price = None
-                    dec = self.config.price_decimals
-                    if self.risk.position > 0:
-                        exit_price = round(self.tob.best_bid * 0.9999, dec)
-                        self.orders.create_order(OrderSide.SELL, exit_price, abs(self.risk.position), force_taker=True)
-                    elif self.risk.position < 0:
-                        exit_price = round(self.tob.best_ask * 1.0001, dec)
-                        self.orders.create_order(OrderSide.BUY, exit_price, abs(self.risk.position), force_taker=True)
-                    if exit_price is not None:
-                        self._status_reason = "time_stop"
-                        logger.warning(f"TIME STOP: Position held {hold_time:.0f}s > max {dynamic_hold:.0f}s — force exit at {exit_price:.2f}")
-                        self.telegram.send_alert(f"⏰ <b>TIME STOP</b>\nForce exit after {hold_time:.0f}s\nPrice: ${exit_price:,.2f}")
+                exit_side = OrderSide.SELL if self.risk.position > 0 else OrderSide.BUY
+                has_exit_order = any(o.side == exit_side for o in self.orders.open_orders.values())
+                if has_exit_order and (now_mono - self._force_exit_order_time) < reprice_after:
+                    self._status_reason = "time_stop"
+                    return
+                self._last_force_exit_time = now_mono
+                self._force_exit_order_time = now_mono
+                self.orders.cancel_all()
+                exit_price = None
+                dec = self.config.price_decimals
+                if self.risk.position > 0:
+                    exit_price = round(self.tob.best_bid * 0.999, dec)
+                    self.orders.create_order(OrderSide.SELL, exit_price, abs(self.risk.position), force_taker=True)
+                elif self.risk.position < 0:
+                    exit_price = round(self.tob.best_ask * 1.001, dec)
+                    self.orders.create_order(OrderSide.BUY, exit_price, abs(self.risk.position), force_taker=True)
+                if exit_price is not None:
+                    self._status_reason = "time_stop"
+                    logger.warning(f"TIME STOP: Position held {hold_time:.0f}s > max {dynamic_hold:.0f}s — force exit at {exit_price:.2f}")
+                    self.telegram.send_alert(f"⏰ <b>TIME STOP</b>\nForce exit after {hold_time:.0f}s\nPrice: ${exit_price:,.2f}")
                 self._status_reason = "time_stop"
                 return
 
@@ -977,21 +985,26 @@ class HFTScalper:
             else:
                 adverse_bps = (mid - self.risk.avg_entry_price) / self.risk.avg_entry_price * 10_000
             if adverse_bps > self.config.stop_loss_bps:
-                if (now_mono - self._last_force_exit_time) > force_exit_cooldown:
-                    self._last_force_exit_time = now_mono
-                    self.orders.cancel_all()
-                    exit_price = None
-                    dec = self.config.price_decimals
-                    if self.risk.position > 0:
-                        exit_price = round(self.tob.best_bid * 0.9999, dec)
-                        self.orders.create_order(OrderSide.SELL, exit_price, abs(self.risk.position), force_taker=True)
-                    elif self.risk.position < 0:
-                        exit_price = round(self.tob.best_ask * 1.0001, dec)
-                        self.orders.create_order(OrderSide.BUY, exit_price, abs(self.risk.position), force_taker=True)
-                    if exit_price is not None:
-                        self._status_reason = "stop_loss"
-                        logger.warning(f"STOP LOSS: Adverse move {adverse_bps:.1f}bps > max {self.config.stop_loss_bps:.1f}bps — force exit at {exit_price:.2f}")
-                        self.telegram.send_alert(f"🛑 <b>STOP LOSS</b>\nAdverse move {adverse_bps:.1f}bps\nForce exit at ${exit_price:,.2f}")
+                exit_side = OrderSide.SELL if self.risk.position > 0 else OrderSide.BUY
+                has_exit_order = any(o.side == exit_side for o in self.orders.open_orders.values())
+                if has_exit_order and (now_mono - self._force_exit_order_time) < reprice_after:
+                    self._status_reason = "stop_loss"
+                    return
+                self._last_force_exit_time = now_mono
+                self._force_exit_order_time = now_mono
+                self.orders.cancel_all()
+                exit_price = None
+                dec = self.config.price_decimals
+                if self.risk.position > 0:
+                    exit_price = round(self.tob.best_bid * 0.999, dec)
+                    self.orders.create_order(OrderSide.SELL, exit_price, abs(self.risk.position), force_taker=True)
+                elif self.risk.position < 0:
+                    exit_price = round(self.tob.best_ask * 1.001, dec)
+                    self.orders.create_order(OrderSide.BUY, exit_price, abs(self.risk.position), force_taker=True)
+                if exit_price is not None:
+                    self._status_reason = "stop_loss"
+                    logger.warning(f"STOP LOSS: Adverse move {adverse_bps:.1f}bps > max {self.config.stop_loss_bps:.1f}bps — force exit at {exit_price:.2f}")
+                    self.telegram.send_alert(f"🛑 <b>STOP LOSS</b>\nAdverse move {adverse_bps:.1f}bps\nForce exit at ${exit_price:,.2f}")
                 self._status_reason = "stop_loss"
                 return
 
@@ -1428,6 +1441,7 @@ class PairTrader:
         self._last_live_fill_poll: float = 0.0
         self._status_reason: str = "initializing"
         self._last_force_exit_time: float = 0.0
+        self._force_exit_order_time: float = 0.0
         self._allocated_balance: float = allocated_balance
         self._tick_lock = threading.Lock()
 
@@ -1511,6 +1525,8 @@ class PairTrader:
 
         for order in filled:
             self.risk.record_fill(order.side, order.price, order.quantity)
+            if abs(self.risk.position) < self.risk._dust_qty:
+                self._force_exit_order_time = 0.0
             mid = self.tob.mid_price
             self._trade_history.append({
                 "time": time.time(),
@@ -1561,26 +1577,31 @@ class PairTrader:
             return
 
         now_mono = time.monotonic()
-        force_exit_cooldown = 5.0
+        reprice_after = 30.0
         if abs(self.risk.position) > self.risk._dust_qty and self.risk._position_entry_time > 0:
             hold_time = now_mono - self.risk._position_entry_time
             dynamic_hold = self.risk.dynamic_hold_seconds(self.risk.dynamic_exit_bps(self._volatility_bps))
             if hold_time > dynamic_hold:
-                if (now_mono - self._last_force_exit_time) > force_exit_cooldown:
-                    self._last_force_exit_time = now_mono
-                    self.orders.cancel_all()
-                    exit_price = None
-                    dec = self.config.price_decimals
-                    if self.risk.position > 0:
-                        exit_price = round(self.tob.best_bid * 0.9999, dec)
-                        self.orders.create_order(OrderSide.SELL, exit_price, abs(self.risk.position), force_taker=True)
-                    elif self.risk.position < 0:
-                        exit_price = round(self.tob.best_ask * 1.0001, dec)
-                        self.orders.create_order(OrderSide.BUY, exit_price, abs(self.risk.position), force_taker=True)
-                    if exit_price is not None:
-                        self._status_reason = "time_stop"
-                        logger.warning(f"TIME STOP [{self.config.symbol}]: Position held {hold_time:.0f}s > max {dynamic_hold:.0f}s — force exit at {exit_price}")
-                        self.telegram.send_alert(f"⏰ <b>TIME STOP</b> | {self.config.symbol}\nForce exit after {hold_time:.0f}s\nPrice: ${exit_price:,.2f}")
+                exit_side = OrderSide.SELL if self.risk.position > 0 else OrderSide.BUY
+                has_exit_order = any(o.side == exit_side for o in self.orders.open_orders.values())
+                if has_exit_order and (now_mono - self._force_exit_order_time) < reprice_after:
+                    self._status_reason = "time_stop"
+                    return
+                self._last_force_exit_time = now_mono
+                self._force_exit_order_time = now_mono
+                self.orders.cancel_all()
+                exit_price = None
+                dec = self.config.price_decimals
+                if self.risk.position > 0:
+                    exit_price = round(self.tob.best_bid * 0.999, dec)
+                    self.orders.create_order(OrderSide.SELL, exit_price, abs(self.risk.position), force_taker=True)
+                elif self.risk.position < 0:
+                    exit_price = round(self.tob.best_ask * 1.001, dec)
+                    self.orders.create_order(OrderSide.BUY, exit_price, abs(self.risk.position), force_taker=True)
+                if exit_price is not None:
+                    self._status_reason = "time_stop"
+                    logger.warning(f"TIME STOP [{self.config.symbol}]: Position held {hold_time:.0f}s > max {dynamic_hold:.0f}s — force exit at {exit_price}")
+                    self.telegram.send_alert(f"⏰ <b>TIME STOP</b> | {self.config.symbol}\nForce exit after {hold_time:.0f}s\nPrice: ${exit_price:,.2f}")
                 self._status_reason = "time_stop"
                 return
 
@@ -1591,21 +1612,26 @@ class PairTrader:
             else:
                 adverse_bps = (mid - self.risk.avg_entry_price) / self.risk.avg_entry_price * 10_000
             if adverse_bps > self.config.stop_loss_bps:
-                if (now_mono - self._last_force_exit_time) > force_exit_cooldown:
-                    self._last_force_exit_time = now_mono
-                    self.orders.cancel_all()
-                    exit_price = None
-                    dec = self.config.price_decimals
-                    if self.risk.position > 0:
-                        exit_price = round(self.tob.best_bid * 0.9999, dec)
-                        self.orders.create_order(OrderSide.SELL, exit_price, abs(self.risk.position), force_taker=True)
-                    elif self.risk.position < 0:
-                        exit_price = round(self.tob.best_ask * 1.0001, dec)
-                        self.orders.create_order(OrderSide.BUY, exit_price, abs(self.risk.position), force_taker=True)
-                    if exit_price is not None:
-                        self._status_reason = "stop_loss"
-                        logger.warning(f"STOP LOSS [{self.config.symbol}]: Adverse move {adverse_bps:.1f}bps > max {self.config.stop_loss_bps:.1f}bps — force exit at {exit_price}")
-                        self.telegram.send_alert(f"🛑 <b>STOP LOSS</b> | {self.config.symbol}\nAdverse move {adverse_bps:.1f}bps\nForce exit at ${exit_price:,.2f}")
+                exit_side = OrderSide.SELL if self.risk.position > 0 else OrderSide.BUY
+                has_exit_order = any(o.side == exit_side for o in self.orders.open_orders.values())
+                if has_exit_order and (now_mono - self._force_exit_order_time) < reprice_after:
+                    self._status_reason = "stop_loss"
+                    return
+                self._last_force_exit_time = now_mono
+                self._force_exit_order_time = now_mono
+                self.orders.cancel_all()
+                exit_price = None
+                dec = self.config.price_decimals
+                if self.risk.position > 0:
+                    exit_price = round(self.tob.best_bid * 0.999, dec)
+                    self.orders.create_order(OrderSide.SELL, exit_price, abs(self.risk.position), force_taker=True)
+                elif self.risk.position < 0:
+                    exit_price = round(self.tob.best_ask * 1.001, dec)
+                    self.orders.create_order(OrderSide.BUY, exit_price, abs(self.risk.position), force_taker=True)
+                if exit_price is not None:
+                    self._status_reason = "stop_loss"
+                    logger.warning(f"STOP LOSS [{self.config.symbol}]: Adverse move {adverse_bps:.1f}bps > max {self.config.stop_loss_bps:.1f}bps — force exit at {exit_price}")
+                    self.telegram.send_alert(f"🛑 <b>STOP LOSS</b> | {self.config.symbol}\nAdverse move {adverse_bps:.1f}bps\nForce exit at ${exit_price:,.2f}")
                 self._status_reason = "stop_loss"
                 return
 
