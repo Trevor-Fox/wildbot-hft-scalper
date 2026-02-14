@@ -166,17 +166,12 @@ def health():
     return "ok", 200
 
 
+def _delayed_scalper_start():
+    time.sleep(1)
+    _ensure_scalper_started()
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    for attempt in range(3):
-        try:
-            result = subprocess.run(["fuser", f"{port}/tcp"], capture_output=True, text=True, timeout=5)
-            if result.stdout.strip():
-                subprocess.run(["fuser", "-k", "-9", f"{port}/tcp"], capture_output=True, timeout=5)
-                time.sleep(1)
-            else:
-                break
-        except Exception:
-            break
-    _ensure_scalper_started()
+    threading.Thread(target=_delayed_scalper_start, daemon=True).start()
     app.run(host="0.0.0.0", port=port, threaded=True)
