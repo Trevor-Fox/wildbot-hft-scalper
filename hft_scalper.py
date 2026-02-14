@@ -112,8 +112,8 @@ SCAN_PAIRS = [
     PairConfig("BTC/USDC", "XBTUSDC", "BTC", 0.0001, 1, 8),
     PairConfig("ETH/USDC", "ETHUSDC", "ETH", 0.01, 2, 8),
     PairConfig("SOL/USDC", "SOLUSDC", "SOL", 0.25, 4, 8),
-    PairConfig("DOGE/USDC", "DOGEUSDC", "DOGE", 50.0, 6, 2),
-    PairConfig("XRP/USDC", "XRPUSDC", "XRP", 10.0, 6, 2),
+    PairConfig("DOGE/USDC", "DOGEUSDC", "DOGE", 50.0, 5, 2),
+    PairConfig("XRP/USDC", "XRPUSDC", "XRP", 10.0, 5, 2),
     PairConfig("LINK/USDC", "LINKUSDC", "LINK", 0.2, 4, 8),
     PairConfig("AVAX/USDC", "AVAXUSDC", "AVAX", 0.1, 4, 8),
     PairConfig("ADA/USDC", "ADAUSDC", "ADA", 10.0, 6, 2),
@@ -306,6 +306,7 @@ class ScalperConfig:
     base_hold_seconds: float = 300.0
     max_hold_scaling: float = 3.0
     target_exit_bps: float = 8.0
+    price_decimals: int = 1
 
 
 class RiskManager:
@@ -436,11 +437,12 @@ class RiskManager:
         elif was_flat:
             self._position_entry_time = time.monotonic()
 
+        dec = self.config.price_decimals
         logger.info(
-            f"Fill: {side.value} {qty}@{price:.2f} fee=${fee:.4f} | "
+            f"Fill: {side.value} {qty}@{price:.{dec}f} fee=${fee:.4f} | "
             f"bal=${self.balance:.2f} pos={self.position:.6f} "
             f"pnl={self.pnl:.4f} fees_total=${self.fees_paid:.4f} trades={self.trade_count} "
-            f"avg_entry={self.avg_entry_price:.2f}"
+            f"avg_entry={self.avg_entry_price:.{dec}f}"
         )
 
     def dynamic_exit_bps(self, volatility_bps: float) -> float:
@@ -455,21 +457,22 @@ class RiskManager:
     def calculate_skewed_prices(self, tob: TopOfBook, volatility_bps: float = 0.0) -> tuple[float | None, float | None]:
         mid = tob.microprice
 
+        dec = self.config.price_decimals
         if self.position > self._dust_qty:
             exit_bps = self.dynamic_exit_bps(volatility_bps)
             exit_offset = mid * exit_bps / 10_000
             buy_price = None
-            sell_price = round(max(self.avg_entry_price + exit_offset, tob.best_ask), 2)
+            sell_price = round(max(self.avg_entry_price + exit_offset, tob.best_ask), dec)
         elif self.position < -self._dust_qty:
             exit_bps = self.dynamic_exit_bps(volatility_bps)
             exit_offset = mid * exit_bps / 10_000
-            buy_price = round(min(self.avg_entry_price - exit_offset, tob.best_bid), 2)
+            buy_price = round(min(self.avg_entry_price - exit_offset, tob.best_bid), dec)
             sell_price = None
         else:
             inventory_ratio = self.position / self.config.max_position if self.config.max_position > 0 else 0
             skew = inventory_ratio * self.config.skew_factor
-            buy_price = round(tob.best_bid - skew * tob.spread, 2)
-            sell_price = round(tob.best_ask - skew * tob.spread, 2)
+            buy_price = round(tob.best_bid - skew * tob.spread, dec)
+            sell_price = round(tob.best_ask - skew * tob.spread, dec)
 
         return buy_price, sell_price
 
@@ -525,6 +528,8 @@ class OrderManager:
         self._error_backoff: float = 2.0
         self._filled_during_cancel: list[Order] = []
         self._needs_balance_sync: bool = False
+        self._price_decimals: int = 1
+        self._qty_decimals: int = 8
 
     @property
     def open_orders(self) -> dict[str, Order]:
@@ -564,8 +569,8 @@ class OrderManager:
                 pair=self._rest_pair,
                 side=side.value,
                 order_type="limit",
-                volume=f"{qty:.8f}",
-                price=f"{price:.1f}",
+                volume=f"{qty:.{self._qty_decimals}f}",
+                price=f"{price:.{self._price_decimals}f}",
                 oflags=oflags,
             )
             self._consecutive_errors = 0
@@ -678,7 +683,8 @@ class OrderManager:
                         order.price = avg_price
                         filled.append(order)
                         self._last_fill_time = now_ms
-                        logger.info(f"LIVE fill detected: {order.side.value} {vol_exec}@{avg_price:.2f} txid={txid}")
+                        dec = self._price_decimals
+                        logger.info(f"LIVE fill detected: {order.side.value} {vol_exec}@{avg_price:.{dec}f} txid={txid}")
                 elif status == "canceled" or status == "expired":
                     order = self._open_orders.pop(txid, None)
                     if order:
@@ -734,12 +740,13 @@ class HFTScalper:
         self._price_history: list[float] = []
         self._volatility_bps: float = 0.0
         self._drawdown_alerted: bool = False
-        self._live_fill_poll_interval: float = 5.0
+        self._live_fill_poll_interval: float = 3.0
         self._last_live_fill_poll: float = 0.0
         self._balance_refresh_interval: float = 300.0
         self._last_balance_refresh: float = 0.0
         self._live_balance_deferred: bool = False
         self._status_reason: str = "initializing"
+        self._last_force_exit_time: float = 0.0
 
     @property
     def momentum_signal(self) -> str:
@@ -782,7 +789,12 @@ class HFTScalper:
         self.config.ws_symbol = new_pair.ws_symbol
         self.config.rest_pair = new_pair.rest_pair
         self.config.order_qty = new_pair.min_qty
+        self.config.max_position = new_pair.min_qty * 100
+        self.risk._dust_qty = new_pair.min_qty / 10
         self.orders._rest_pair = new_pair.rest_pair
+        self.config.price_decimals = new_pair.price_decimals
+        self.orders._price_decimals = new_pair.price_decimals
+        self.orders._qty_decimals = new_pair.qty_decimals
 
         self._ema = 0.0
         self._price_history.clear()
@@ -932,24 +944,28 @@ class HFTScalper:
                 logger.debug("Spread too wide — cancelled all orders")
             return
 
+        now_mono = time.monotonic()
+        force_exit_cooldown = 5.0
         if abs(self.risk.position) > self.risk._dust_qty and self.risk._position_entry_time > 0:
-            hold_time = time.monotonic() - self.risk._position_entry_time
+            hold_time = now_mono - self.risk._position_entry_time
             dynamic_hold = self.risk.dynamic_hold_seconds(self.risk.dynamic_exit_bps(self._volatility_bps))
-            if hold_time > dynamic_hold and not self.orders.has_side(
-                OrderSide.SELL if self.risk.position > 0 else OrderSide.BUY
-            ):
-                self.orders.cancel_all()
-                exit_price = None
-                if self.risk.position > 0:
-                    exit_price = round(self.tob.best_bid * 0.9999, 2)
-                    self.orders.create_order(OrderSide.SELL, exit_price, abs(self.risk.position), force_taker=True)
-                elif self.risk.position < 0:
-                    exit_price = round(self.tob.best_ask * 1.0001, 2)
-                    self.orders.create_order(OrderSide.BUY, exit_price, abs(self.risk.position), force_taker=True)
-                if exit_price is not None:
-                    self._status_reason = "time_stop"
-                    logger.warning(f"TIME STOP: Position held {hold_time:.0f}s > max {dynamic_hold:.0f}s — force exit at {exit_price:.2f}")
-                    self.telegram.send_alert(f"⏰ <b>TIME STOP</b>\nForce exit after {hold_time:.0f}s\nPrice: ${exit_price:,.2f}")
+            if hold_time > dynamic_hold:
+                if (now_mono - self._last_force_exit_time) > force_exit_cooldown:
+                    self._last_force_exit_time = now_mono
+                    self.orders.cancel_all()
+                    exit_price = None
+                    dec = self.config.price_decimals
+                    if self.risk.position > 0:
+                        exit_price = round(self.tob.best_bid * 0.9999, dec)
+                        self.orders.create_order(OrderSide.SELL, exit_price, abs(self.risk.position), force_taker=True)
+                    elif self.risk.position < 0:
+                        exit_price = round(self.tob.best_ask * 1.0001, dec)
+                        self.orders.create_order(OrderSide.BUY, exit_price, abs(self.risk.position), force_taker=True)
+                    if exit_price is not None:
+                        self._status_reason = "time_stop"
+                        logger.warning(f"TIME STOP: Position held {hold_time:.0f}s > max {dynamic_hold:.0f}s — force exit at {exit_price:.2f}")
+                        self.telegram.send_alert(f"⏰ <b>TIME STOP</b>\nForce exit after {hold_time:.0f}s\nPrice: ${exit_price:,.2f}")
+                self._status_reason = "time_stop"
                 return
 
         if abs(self.risk.position) > self.risk._dust_qty and self.risk.avg_entry_price > 0:
@@ -958,21 +974,23 @@ class HFTScalper:
                 adverse_bps = (self.risk.avg_entry_price - mid) / self.risk.avg_entry_price * 10_000
             else:
                 adverse_bps = (mid - self.risk.avg_entry_price) / self.risk.avg_entry_price * 10_000
-            if adverse_bps > self.config.stop_loss_bps and not self.orders.has_side(
-                OrderSide.SELL if self.risk.position > 0 else OrderSide.BUY
-            ):
-                self.orders.cancel_all()
-                exit_price = None
-                if self.risk.position > 0:
-                    exit_price = round(self.tob.best_bid * 0.9999, 2)
-                    self.orders.create_order(OrderSide.SELL, exit_price, abs(self.risk.position), force_taker=True)
-                elif self.risk.position < 0:
-                    exit_price = round(self.tob.best_ask * 1.0001, 2)
-                    self.orders.create_order(OrderSide.BUY, exit_price, abs(self.risk.position), force_taker=True)
-                if exit_price is not None:
-                    self._status_reason = "stop_loss"
-                    logger.warning(f"STOP LOSS: Adverse move {adverse_bps:.1f}bps > max {self.config.stop_loss_bps:.1f}bps — force exit at {exit_price:.2f}")
-                    self.telegram.send_alert(f"🛑 <b>STOP LOSS</b>\nAdverse move {adverse_bps:.1f}bps\nForce exit at ${exit_price:,.2f}")
+            if adverse_bps > self.config.stop_loss_bps:
+                if (now_mono - self._last_force_exit_time) > force_exit_cooldown:
+                    self._last_force_exit_time = now_mono
+                    self.orders.cancel_all()
+                    exit_price = None
+                    dec = self.config.price_decimals
+                    if self.risk.position > 0:
+                        exit_price = round(self.tob.best_bid * 0.9999, dec)
+                        self.orders.create_order(OrderSide.SELL, exit_price, abs(self.risk.position), force_taker=True)
+                    elif self.risk.position < 0:
+                        exit_price = round(self.tob.best_ask * 1.0001, dec)
+                        self.orders.create_order(OrderSide.BUY, exit_price, abs(self.risk.position), force_taker=True)
+                    if exit_price is not None:
+                        self._status_reason = "stop_loss"
+                        logger.warning(f"STOP LOSS: Adverse move {adverse_bps:.1f}bps > max {self.config.stop_loss_bps:.1f}bps — force exit at {exit_price:.2f}")
+                        self.telegram.send_alert(f"🛑 <b>STOP LOSS</b>\nAdverse move {adverse_bps:.1f}bps\nForce exit at ${exit_price:,.2f}")
+                self._status_reason = "stop_loss"
                 return
 
         if self.scanner and self._update_count % 50 == 0 and abs(self.risk.position) < self.risk._dust_qty:
@@ -1174,11 +1192,48 @@ class HFTScalper:
             for key in ["ZUSD", "USD", "USDT", "ZUSDT", "USDC", "ZUSDC"]:
                 if key in balances and balances[key] > 0:
                     usd_bal += balances[key]
+
+            asset_keys_map = {
+                "BTC": ["XXBT", "XBT", "BTC"],
+                "ETH": ["XETH", "ETH"],
+                "SOL": ["SOL"],
+                "DOGE": ["DOGE", "XXDG"],
+                "XRP": ["XXRP", "XRP"],
+                "LINK": ["LINK"],
+                "AVAX": ["AVAX"],
+                "ADA": ["ADA"],
+            }
+            symbol = self.config.symbol.split("/")[0] if "/" in self.config.symbol else "BTC"
+            asset_keys = asset_keys_map.get(symbol, [symbol])
+            asset_bal = 0.0
+            for key in asset_keys:
+                if key in balances:
+                    asset_bal += balances[key]
+            asset_bal = asset_bal if asset_bal > self.risk._dust_qty else 0.0
+
             old_bal = self.risk.balance
-            if self.risk.position == 0 and self.risk.trade_count == 0:
+            old_pos = self.risk.position
+
+            if abs(old_pos) > self.risk._dust_qty and asset_bal < self.risk._dust_qty:
+                mid = self.tob.mid_price if self.tob.mid_price > 0 else 0
+                logger.info(f"Position sync: Kraken {symbol}=0 but internal pos={old_pos:.8f} — position was filled on exchange")
+                if mid > 0:
+                    self.risk.record_fill(
+                        OrderSide.SELL if old_pos > 0 else OrderSide.BUY,
+                        mid,
+                        abs(old_pos),
+                    )
+                else:
+                    self.risk.position = 0.0
+                    self.risk.avg_entry_price = 0.0
+                    self.risk._position_entry_time = 0.0
+                self.risk.balance = usd_bal
+                logger.info(f"Balance synced after position close: ${old_bal:,.2f} → ${usd_bal:,.2f}")
+            elif self.risk.position == 0 and self.risk.trade_count == 0:
                 self.risk.balance = usd_bal
                 self.risk.starting_capital = usd_bal
                 self.risk.peak_equity = usd_bal
+
             if abs(usd_bal - old_bal) > 0.01 and self.risk.trade_count == 0:
                 logger.info(f"Balance refreshed: ${old_bal:,.2f} → ${usd_bal:,.2f}")
         except Exception as exc:
@@ -1215,18 +1270,6 @@ class HFTScalper:
                 if key in balances and balances[key] > 0:
                     usd_bal += balances[key]
                     logger.info(f"Found USD balance in {key}: {balances[key]}")
-            btc_bal = balances.get("XXBT", balances.get("XBT", 0.0))
-            if btc_bal < self.config.order_qty:
-                btc_bal = 0.0
-
-            self.risk.balance = usd_bal
-            self.risk.position = btc_bal
-            self.risk.avg_entry_price = 0.0
-            self.risk.starting_capital = usd_bal
-            self.risk.peak_equity = usd_bal
-
-            if btc_bal > 0:
-                self._live_balance_deferred = True
 
             try:
                 self._kraken.cancel_all()
@@ -1234,17 +1277,66 @@ class HFTScalper:
             except Exception:
                 pass
 
+            asset_keys_map = {
+                "BTC": ["XXBT", "XBT", "BTC"],
+                "ETH": ["XETH", "ETH"],
+                "SOL": ["SOL"],
+                "DOGE": ["DOGE", "XXDG"],
+                "XRP": ["XXRP", "XRP"],
+                "LINK": ["LINK"],
+                "AVAX": ["AVAX"],
+                "ADA": ["ADA"],
+            }
+            pair_rest_map = {
+                "BTC": "XBTUSDC", "ETH": "ETHUSDC", "SOL": "SOLUSDC",
+                "DOGE": "DOGEUSDC", "XRP": "XRPUSDC", "LINK": "LINKUSDC",
+                "AVAX": "AVAXUSDC", "ADA": "ADAUSDC",
+            }
+            for asset_name, keys in asset_keys_map.items():
+                asset_bal = sum(balances.get(k, 0.0) for k in keys)
+                if asset_bal > 0:
+                    pair_cfg = next((p for p in SCAN_PAIRS if p.display_name == asset_name), None)
+                    min_qty = pair_cfg.min_qty if pair_cfg else 0.0001
+                    if asset_bal >= min_qty:
+                        rest_pair = pair_rest_map.get(asset_name, f"{asset_name}USDC")
+                        logger.warning(f"Stranded {asset_name} detected: {asset_bal} — selling via {rest_pair}")
+                        try:
+                            dec = pair_cfg.price_decimals if pair_cfg else 2
+                            qty_dec = pair_cfg.qty_decimals if pair_cfg else 8
+                            qty_str = f"{asset_bal:.{qty_dec}f}"
+                            result = self._kraken.add_order(
+                                pair=rest_pair,
+                                side="sell",
+                                order_type="market",
+                                volume=qty_str,
+                                oflags="",
+                            )
+                            logger.info(f"Sold stranded {asset_name}: {result}")
+                            time.sleep(2)
+                            balances = self._kraken.get_balance()
+                            usd_bal = 0.0
+                            for key in ["ZUSD", "USD", "USDT", "ZUSDT", "USDC", "ZUSDC"]:
+                                if key in balances and balances[key] > 0:
+                                    usd_bal += balances[key]
+                        except Exception as e:
+                            logger.warning(f"Failed to sell stranded {asset_name}: {e}")
+
+            self.risk.balance = usd_bal
+            self.risk.position = 0.0
+            self.risk.avg_entry_price = 0.0
+            self.risk.starting_capital = usd_bal
+            self.risk.peak_equity = usd_bal
+
             logger.info(
-                f"LIVE MODE initialized | USD=${usd_bal:,.2f} BTC={btc_bal:.8f}"
+                f"LIVE MODE initialized | USD=${usd_bal:,.2f}"
             )
             self.telegram.send_alert(
                 f"🟢 <b>WildBot LIVE MODE ACTIVE</b>\n"
                 f"Exchange: Kraken\n"
                 f"Pair: {self.config.symbol}\n"
                 f"USD Balance: ${usd_bal:,.2f}\n"
-                f"BTC Balance: {btc_bal:.8f}\n"
-                f"Order Size: {self.config.order_qty} BTC\n"
-                f"Max Position: {self.config.max_position} BTC"
+                f"Order Size: {self.config.order_qty}\n"
+                f"Max Position: {self.config.max_position}"
             )
         except Exception as exc:
             logger.error(f"LIVE MODE initialization failed: {exc} — falling back to paper mode")
