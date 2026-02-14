@@ -1560,8 +1560,11 @@ class PairTrader:
         target_notional = self._allocated_balance * 0.80
         raw_qty = target_notional / mid
         min_qty = self.pair_config.min_qty
-        order_qty = max(min_qty, (raw_qty // min_qty) * min_qty)
-        order_qty = round(order_qty, self.pair_config.qty_decimals)
+        dec = self.pair_config.qty_decimals
+        order_qty = round(raw_qty, dec)
+        if order_qty < min_qty:
+            order_qty = min_qty
+        order_qty = round(order_qty, dec)
         self.config.order_qty = order_qty
         self.config.max_position = order_qty
         self.risk._dust_qty = min_qty / 10
