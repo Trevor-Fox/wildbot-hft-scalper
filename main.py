@@ -1,9 +1,16 @@
 import logging
 import os
+import sys
 import threading
 import time
 
+print(f"[STARTUP] Python: {sys.executable}", flush=True)
+print(f"[STARTUP] CWD: {os.getcwd()}", flush=True)
+print(f"[STARTUP] PORT env: {os.environ.get('PORT', 'not set')}", flush=True)
+
 from flask import Flask, jsonify, render_template
+
+print("[STARTUP] Flask imported successfully", flush=True)
 
 logging.getLogger("werkzeug").setLevel(logging.WARNING)
 
@@ -166,5 +173,6 @@ def health():
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
+    print(f"[STARTUP] Starting Flask on 0.0.0.0:{port}", flush=True)
     threading.Thread(target=_ensure_scalper_started, daemon=True).start()
     app.run(host="0.0.0.0", port=port, threaded=True)
