@@ -326,6 +326,7 @@ class RiskManager:
         self.peak_equity: float = config.starting_capital
         self.max_drawdown_pct_seen: float = 0.0
         self.is_stopped: bool = False
+        self._drawdown_logged: bool = False
         self.avg_entry_price: float = 0.0
         self._trip_cost: float = 0.0
         self.fees_paid: float = 0.0
@@ -486,10 +487,12 @@ class RiskManager:
             self.max_drawdown_pct_seen = max(self.max_drawdown_pct_seen, drawdown_pct)
             if drawdown_pct > self.config.max_drawdown_pct:
                 self.is_stopped = True
-                logger.warning(
-                    f"DRAWDOWN STOP: {drawdown_pct:.2f}% drawdown exceeds "
-                    f"max {self.config.max_drawdown_pct:.2f}% — stopping trading"
-                )
+                if not self._drawdown_logged:
+                    self._drawdown_logged = True
+                    logger.warning(
+                        f"DRAWDOWN STOP: {drawdown_pct:.2f}% drawdown exceeds "
+                        f"max {self.config.max_drawdown_pct:.2f}% — stopping trading"
+                    )
 
     @property
     def win_rate(self) -> float:
@@ -1472,6 +1475,9 @@ class PairTrader:
         self.risk.balance = allocated_balance
         self.risk.starting_capital = allocated_balance
         self.risk.peak_equity = allocated_balance
+        self.risk.is_stopped = False
+        self.risk._drawdown_logged = False
+        self.risk.max_drawdown_pct_seen = 0.0
 
         self._kraken = kraken_client
         self.orders = OrderManager(self.config, kraken_client=kraken_client)
@@ -1505,6 +1511,10 @@ class PairTrader:
         self._allocated_balance = value
         self.risk.balance = value
         self.risk.starting_capital = value
+        self.risk.peak_equity = value
+        self.risk.is_stopped = False
+        self.risk._drawdown_logged = False
+        self.risk.max_drawdown_pct_seen = 0.0
         self._qty_sized = False
 
     @property
