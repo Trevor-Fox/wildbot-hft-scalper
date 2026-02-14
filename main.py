@@ -1,54 +1,54 @@
-import asyncio
 import logging
 import os
-import signal
-import socket
 import subprocess
 import threading
 import time
 
 from flask import Flask, jsonify, render_template
-from hft_scalper import MultiPairOrchestrator, ScalperConfig, PairScanner, SCAN_PAIRS
-from kraken_client import KrakenClient
 
 logging.getLogger("werkzeug").setLevel(logging.WARNING)
 
 app = Flask(__name__)
 
-config = ScalperConfig(
-    symbol="BTC/USDC",
-    ws_url="wss://ws.kraken.com/v2",
-    ws_symbol="BTC/USDC",
-    rest_pair="XBTUSDC",
-    starting_capital=16.0,
-    order_qty=0.0001,
-    max_spread_bps=15.0,
-    stale_order_ms=10000.0,
-    max_position=0.01,
-    max_open_orders=2,
-    live_mode=True,
-    maker_fee_bps=16.0,
-    min_profit_bps=2.0,
-    target_exit_bps=50.0,
-    min_volatility_bps=0.1,
-    max_hold_seconds=300.0,
-    stop_loss_bps=60.0,
-    fill_cooldown_ms=200.0,
-    volatility_exit_multiplier=1.2,
-    min_hold_seconds=30.0,
-    base_hold_seconds=600.0,
-    max_hold_scaling=3.0,
-    requote_threshold_bps=15.0,
-)
-
 orchestrator = None
 start_time = time.time()
 bot_ready = False
 _scalper_started = False
+_start_lock = threading.Lock()
 
 
-def run_scalper():
+def _init_and_run_scalper():
     global orchestrator, bot_ready
+    import asyncio
+    from hft_scalper import MultiPairOrchestrator, ScalperConfig, PairScanner, SCAN_PAIRS
+    from kraken_client import KrakenClient
+
+    config = ScalperConfig(
+        symbol="BTC/USDC",
+        ws_url="wss://ws.kraken.com/v2",
+        ws_symbol="BTC/USDC",
+        rest_pair="XBTUSDC",
+        starting_capital=16.0,
+        order_qty=0.0001,
+        max_spread_bps=15.0,
+        stale_order_ms=10000.0,
+        max_position=0.01,
+        max_open_orders=2,
+        live_mode=True,
+        maker_fee_bps=16.0,
+        min_profit_bps=2.0,
+        target_exit_bps=50.0,
+        min_volatility_bps=0.1,
+        max_hold_seconds=300.0,
+        stop_loss_bps=60.0,
+        fill_cooldown_ms=200.0,
+        volatility_exit_multiplier=1.2,
+        min_hold_seconds=30.0,
+        base_hold_seconds=600.0,
+        max_hold_scaling=3.0,
+        requote_threshold_bps=15.0,
+    )
+
     kraken = KrakenClient()
     scanner = PairScanner(SCAN_PAIRS)
     orchestrator = MultiPairOrchestrator(
@@ -66,12 +66,13 @@ def run_scalper():
         loop.close()
 
 
-def start_scalper_if_needed():
+def _ensure_scalper_started():
     global _scalper_started
-    if not _scalper_started:
-        _scalper_started = True
-        t = threading.Thread(target=run_scalper, daemon=True)
-        t.start()
+    with _start_lock:
+        if not _scalper_started:
+            _scalper_started = True
+            t = threading.Thread(target=_init_and_run_scalper, daemon=True)
+            t.start()
 
 
 @app.after_request
@@ -82,7 +83,7 @@ def add_cache_headers(response):
 
 @app.route("/")
 def dashboard():
-    start_scalper_if_needed()
+    _ensure_scalper_started()
     if not bot_ready:
         return "<h1>WildBot starting up...</h1><meta http-equiv='refresh' content='3'>", 200
     return render_template("dashboard.html")
@@ -90,11 +91,11 @@ def dashboard():
 
 @app.route("/api/status")
 def api_status():
-    start_scalper_if_needed()
+    _ensure_scalper_started()
     if not bot_ready or orchestrator is None:
         return jsonify({
             "status": "starting",
-            "live_mode": config.live_mode,
+            "live_mode": True,
             "multi_pair": True,
             "max_active_pairs": 3,
             "total_balance": 0,
@@ -175,5 +176,5 @@ if __name__ == "__main__":
             pass
         time.sleep(1)
 
-    start_scalper_if_needed()
+    _ensure_scalper_started()
     app.run(host="0.0.0.0", port=port)
