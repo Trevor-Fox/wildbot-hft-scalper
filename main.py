@@ -84,6 +84,11 @@ def _ensure_scalper_started():
             t.start()
 
 
+@app.before_request
+def auto_start_bot():
+    _ensure_scalper_started()
+
+
 @app.after_request
 def add_cache_headers(response):
     response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
@@ -92,7 +97,6 @@ def add_cache_headers(response):
 
 @app.route("/")
 def dashboard():
-    _ensure_scalper_started()
     if not bot_ready:
         return "<h1>WildBot starting up...</h1><meta http-equiv='refresh' content='3'>", 200
     return render_template("dashboard.html")
@@ -100,7 +104,6 @@ def dashboard():
 
 @app.route("/api/status")
 def api_status():
-    _ensure_scalper_started()
     if not bot_ready or orchestrator is None:
         return jsonify({
             "status": "starting",
@@ -171,8 +174,10 @@ def health():
     return "ok", 200
 
 
+print("[STARTUP] All routes registered, starting server...", flush=True)
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     print(f"[STARTUP] Starting Flask on 0.0.0.0:{port}", flush=True)
-    threading.Thread(target=_ensure_scalper_started, daemon=True).start()
+    _ensure_scalper_started()
     app.run(host="0.0.0.0", port=port, threaded=True)
