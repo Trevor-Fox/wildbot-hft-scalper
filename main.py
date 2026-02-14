@@ -138,8 +138,9 @@ def api_status():
 
 
 @app.route("/health")
+@app.route("/healthz")
 def health():
-    return jsonify({"status": "ok"})
+    return "ok", 200
 
 
 start_time = time.time()
