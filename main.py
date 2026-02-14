@@ -44,7 +44,7 @@ config = ScalperConfig(
     starting_capital=16.0,
     order_qty=0.0001,
     max_spread_bps=50.0,
-    stale_order_ms=5000.0,
+    stale_order_ms=15000.0,
     max_position=0.01,
     max_open_orders=2,
     live_mode=True,
@@ -52,14 +52,14 @@ config = ScalperConfig(
     min_profit_bps=2.0,
     target_exit_bps=8.0,
     min_volatility_bps=0.1,
-    max_hold_seconds=60.0,
+    max_hold_seconds=120.0,
     stop_loss_bps=12.0,
     fill_cooldown_ms=100.0,
     volatility_exit_multiplier=0.8,
     min_hold_seconds=5.0,
-    base_hold_seconds=60.0,
+    base_hold_seconds=120.0,
     max_hold_scaling=2.0,
-    requote_threshold_bps=3.0,
+    requote_threshold_bps=8.0,
 )
 
 kraken = KrakenClient()

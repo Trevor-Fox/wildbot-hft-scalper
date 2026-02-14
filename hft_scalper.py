@@ -585,7 +585,7 @@ class OrderManager:
                 placed_at=time.monotonic(),
             )
             self._open_orders[txid] = order
-            logger.info(f"LIVE placed {side.value} order {txid}: {qty}@{price:.2f}")
+            logger.info(f"LIVE placed {side.value} order {txid}: {qty}@{price:.{self._price_decimals}f}")
             return order
         except Exception as exc:
             self._consecutive_errors += 1
@@ -1937,7 +1937,7 @@ class MultiPairOrchestrator:
 
     async def _pair_management_loop(self):
         while self._running:
-            await asyncio.sleep(30)
+            await asyncio.sleep(120)
             self._maybe_swap_pairs()
 
             if self.base_config.live_mode and self._kraken:
