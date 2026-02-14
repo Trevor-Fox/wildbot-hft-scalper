@@ -32,7 +32,7 @@ outputType = "webview"
 
 [deployment]
 deploymentTarget = "vm"
-run = ["gunicorn", "--bind=0.0.0.0:5000", "--workers=1", "--threads=4", "--timeout=120", "--reuse-port", "main:app"]
+run = ["bash", "-c", "gunicorn --bind=0.0.0.0:${PORT:-5000} --workers=1 --threads=4 --timeout=120 --reuse-port main:app"]
 
 [[ports]]
 localPort = 5000
