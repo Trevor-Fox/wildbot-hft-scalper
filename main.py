@@ -13,28 +13,7 @@ from kraken_client import KrakenClient
 
 logging.getLogger("werkzeug").setLevel(logging.WARNING)
 
-port = int(os.environ.get("PORT", 5000))
-for attempt in range(5):
-    try:
-        result = subprocess.run(["fuser", f"{port}/tcp"], capture_output=True, text=True, timeout=5)
-        if result.stdout.strip():
-            subprocess.run(["fuser", "-k", "-9", f"{port}/tcp"], capture_output=True, timeout=5)
-            time.sleep(2)
-        else:
-            break
-    except Exception:
-        pass
-    time.sleep(1)
-
 app = Flask(__name__)
-
-import werkzeug.serving
-original_make_server = werkzeug.serving.make_server
-def patched_make_server(*args, **kwargs):
-    server = original_make_server(*args, **kwargs)
-    server.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    return server
-werkzeug.serving.make_server = patched_make_server
 
 config = ScalperConfig(
     symbol="BTC/USDC",
@@ -65,6 +44,7 @@ config = ScalperConfig(
 orchestrator = None
 start_time = time.time()
 bot_ready = False
+_scalper_started = False
 
 
 def run_scalper():
@@ -86,6 +66,14 @@ def run_scalper():
         loop.close()
 
 
+def start_scalper_if_needed():
+    global _scalper_started
+    if not _scalper_started:
+        _scalper_started = True
+        t = threading.Thread(target=run_scalper, daemon=True)
+        t.start()
+
+
 @app.after_request
 def add_cache_headers(response):
     response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
@@ -94,6 +82,7 @@ def add_cache_headers(response):
 
 @app.route("/")
 def dashboard():
+    start_scalper_if_needed()
     if not bot_ready:
         return "<h1>WildBot starting up...</h1><meta http-equiv='refresh' content='3'>", 200
     return render_template("dashboard.html")
@@ -101,6 +90,7 @@ def dashboard():
 
 @app.route("/api/status")
 def api_status():
+    start_scalper_if_needed()
     if not bot_ready or orchestrator is None:
         return jsonify({
             "status": "starting",
@@ -171,8 +161,19 @@ def health():
     return "ok", 200
 
 
-scalper_thread = threading.Thread(target=run_scalper, daemon=True)
-scalper_thread.start()
-
 if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
+    for attempt in range(5):
+        try:
+            result = subprocess.run(["fuser", f"{port}/tcp"], capture_output=True, text=True, timeout=5)
+            if result.stdout.strip():
+                subprocess.run(["fuser", "-k", "-9", f"{port}/tcp"], capture_output=True, timeout=5)
+                time.sleep(2)
+            else:
+                break
+        except Exception:
+            pass
+        time.sleep(1)
+
+    start_scalper_if_needed()
     app.run(host="0.0.0.0", port=port)
