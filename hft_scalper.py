@@ -1,4 +1,5 @@
 import asyncio
+import concurrent.futures
 import copy
 import json
 import os
@@ -1423,11 +1424,12 @@ class PairTrader:
         self._price_history: list[float] = []
         self._volatility_bps: float = 0.0
         self._drawdown_alerted: bool = False
-        self._live_fill_poll_interval: float = 3.0
+        self._live_fill_poll_interval: float = 5.0
         self._last_live_fill_poll: float = 0.0
         self._status_reason: str = "initializing"
         self._last_force_exit_time: float = 0.0
         self._allocated_balance: float = allocated_balance
+        self._tick_lock = threading.Lock()
 
     @property
     def allocated_balance(self) -> float:
@@ -1478,6 +1480,14 @@ class PairTrader:
         self.tob.timestamp = time.time()
 
     def handle_tick(self):
+        if not self._tick_lock.acquire(blocking=False):
+            return
+        try:
+            self._handle_tick_inner()
+        finally:
+            self._tick_lock.release()
+
+    def _handle_tick_inner(self):
         self._update_count += 1
         self._update_ema()
 
@@ -1761,6 +1771,12 @@ class MultiPairOrchestrator:
         if self.scanner and pair_config.ws_symbol in self.scanner.tobs:
             scanner_tob = self.scanner.tobs[pair_config.ws_symbol]
             trader.update_tob(scanner_tob.best_bid, scanner_tob.best_ask, scanner_tob.bid_qty, scanner_tob.ask_qty)
+            scanner_history = self.scanner._price_histories.get(pair_config.ws_symbol, [])
+            if scanner_history:
+                trader._price_history = list(scanner_history)
+                trader._volatility_bps = self.scanner._volatilities.get(pair_config.ws_symbol, 0.0)
+                if scanner_tob.mid_price > 0:
+                    trader._ema = scanner_tob.mid_price
         with self._traders_lock:
             self.active_traders[pair_config.ws_symbol] = trader
         logger.info(f"ACTIVATED pair {pair_config.ws_symbol} with ${per_pair_balance:.2f} allocated")
@@ -1908,13 +1924,14 @@ class MultiPairOrchestrator:
                     })
                     await ws.send(sub_msg)
                     delay = self.base_config.reconnect_delay
+                    _executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
                     async for msg in ws:
                         if not self._running:
                             break
                         self._update_count += 1
                         is_update, bid, ask, bid_qty, ask_qty, symbol = self._parse_depth_update(msg)
                         if is_update and symbol:
-                            self._handle_tick(symbol, bid, ask, bid_qty, ask_qty)
+                            _executor.submit(self._handle_tick, symbol, bid, ask, bid_qty, ask_qty)
             except websockets.exceptions.ConnectionClosed as exc:
                 logger.warning(f"MultiPair: Connection closed: {exc}")
                 self.telegram.send_alert(
@@ -1936,6 +1953,8 @@ class MultiPairOrchestrator:
                 delay = min(delay * 2, self.base_config.max_reconnect_delay)
 
     async def _pair_management_loop(self):
+        await asyncio.sleep(30)
+        self._maybe_swap_pairs()
         while self._running:
             await asyncio.sleep(120)
             self._maybe_swap_pairs()
