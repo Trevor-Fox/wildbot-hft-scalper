@@ -283,8 +283,8 @@ class ScalperConfig:
     rest_pair: str = "XBTUSD"
     starting_capital: float = 16.0
     order_qty: float = 0.001
-    max_spread_bps: float = 10.0
-    stale_order_ms: float = 500.0
+    max_spread_bps: float = 15.0
+    stale_order_ms: float = 10000.0
     max_position: float = 0.01
     max_open_orders: int = 2
     tick_size: float = 0.01
@@ -298,16 +298,16 @@ class ScalperConfig:
     live_mode: bool = False
     maker_fee_bps: float = 16.0
     min_profit_bps: float = 2.0
-    requote_threshold_bps: float = 5.0
+    requote_threshold_bps: float = 15.0
     min_volatility_bps: float = 3.0
     volatility_window: int = 100
-    max_hold_seconds: float = 120.0
-    stop_loss_bps: float = 20.0
-    volatility_exit_multiplier: float = 0.8
-    min_hold_seconds: float = 10.0
-    base_hold_seconds: float = 300.0
+    max_hold_seconds: float = 300.0
+    stop_loss_bps: float = 60.0
+    volatility_exit_multiplier: float = 1.2
+    min_hold_seconds: float = 30.0
+    base_hold_seconds: float = 600.0
     max_hold_scaling: float = 3.0
-    target_exit_bps: float = 8.0
+    target_exit_bps: float = 50.0
     price_decimals: int = 1
 
 
@@ -644,21 +644,43 @@ class OrderManager:
     def cancel_all(self) -> int:
         count = len(self._open_orders)
         if self._live_mode and self._kraken and count > 0:
-            try:
-                cancelled = self._kraken.cancel_all()
-                logger.info(f"LIVE cancelled {cancelled} orders on exchange")
-            except Exception as exc:
-                logger.warning(f"LIVE cancel_all failed: {exc}")
-                for oid in list(self._open_orders):
-                    try:
-                        self._kraken.cancel_order(oid)
-                    except Exception:
-                        pass
+            filled_oids = set()
+            for oid in list(self._open_orders):
+                try:
+                    self._kraken.cancel_order(oid)
+                    logger.info(f"LIVE order canceled: {oid}")
+                except Exception as exc:
+                    err_str = str(exc)
+                    if "Unknown order" in err_str:
+                        order = self._open_orders.get(oid)
+                        if order:
+                            try:
+                                query_result = self._kraken.query_orders([oid])
+                                order_info = query_result.get(oid, {})
+                                if order_info:
+                                    vol_exec = float(order_info.get("vol_exec", 0))
+                                    avg_price = float(order_info.get("price", 0))
+                                    total_vol = vol_exec
+                                    if total_vol > 0 and avg_price > 0:
+                                        order.status = OrderStatus.FILLED
+                                        order.quantity = total_vol
+                                        order.price = avg_price
+                                        self._filled_during_cancel.append(order)
+                                        filled_oids.add(oid)
+                                        logger.info(f"LIVE order {oid} was FILLED before cancel: {order.side.value} {total_vol}@{avg_price:.2f}")
+                                        continue
+                            except Exception:
+                                pass
+                        logger.info(f"LIVE order {oid} gone from exchange (filled or expired)")
+                    else:
+                        logger.warning(f"LIVE cancel failed for {oid}: {exc}")
+            for oid in filled_oids:
+                self._open_orders.pop(oid, None)
         for oid in list(self._open_orders):
             self._open_orders[oid].status = OrderStatus.CANCELLED
         self._open_orders.clear()
         if count:
-            logger.info(f"Cancelled all {count} open orders")
+            logger.info(f"Cancelled {count} orders for {self._rest_pair}")
         return count
 
     def check_fills_live(self) -> list[Order]:
@@ -1318,7 +1340,12 @@ class HFTScalper:
                         try:
                             dec = pair_cfg.price_decimals if pair_cfg else 2
                             qty_dec = pair_cfg.qty_decimals if pair_cfg else 8
-                            qty_str = f"{asset_bal:.{qty_dec}f}"
+                            sell_qty = int(asset_bal / min_qty) * min_qty
+                            sell_qty = round(sell_qty, qty_dec)
+                            if sell_qty < min_qty:
+                                logger.info(f"Stranded {asset_name} qty {asset_bal} below min {min_qty}, skipping")
+                                continue
+                            qty_str = f"{sell_qty:.{qty_dec}f}"
                             result = self._kraken.add_order(
                                 pair=rest_pair,
                                 side="sell",
@@ -1326,7 +1353,7 @@ class HFTScalper:
                                 volume=qty_str,
                                 oflags="",
                             )
-                            logger.info(f"Sold stranded {asset_name}: {result}")
+                            logger.info(f"Sold stranded {asset_name}: {qty_str}")
                             time.sleep(2)
                             balances = self._kraken.get_balance()
                             usd_bal = 0.0
@@ -2073,7 +2100,12 @@ class MultiPairOrchestrator:
                         logger.warning(f"Stranded {asset_name} detected: {asset_bal} — selling via {rest_pair}")
                         try:
                             qty_dec = pair_cfg.qty_decimals if pair_cfg else 8
-                            qty_str = f"{asset_bal:.{qty_dec}f}"
+                            sell_qty = int(asset_bal / min_qty) * min_qty
+                            sell_qty = round(sell_qty, qty_dec)
+                            if sell_qty < min_qty:
+                                logger.info(f"Stranded {asset_name} qty {asset_bal} below min {min_qty}, skipping")
+                                continue
+                            qty_str = f"{sell_qty:.{qty_dec}f}"
                             self._kraken.add_order(
                                 pair=rest_pair,
                                 side="sell",
@@ -2081,7 +2113,7 @@ class MultiPairOrchestrator:
                                 volume=qty_str,
                                 oflags="",
                             )
-                            logger.info(f"Sold stranded {asset_name}")
+                            logger.info(f"Sold stranded {asset_name}: {qty_str}")
                             time.sleep(2)
                             balances = self._kraken.get_balance()
                             usd_bal = 0.0

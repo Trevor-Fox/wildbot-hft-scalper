@@ -20,7 +20,7 @@ The core system is built with Python 3.11 using an `asyncio` architecture for no
 - **Order Management:** Supports dual-mode operation:
     - **Paper Trading:** Simulated fills for strategy testing.
     - **Live Trading:** Real order placement and cancellation on Kraken via REST API with HMAC-SHA512 authentication and 1-second rate limiting per API call. Includes strict affordability checks and automatic fallback to paper mode on API connection failure.
-- **Risk Management:** Incorporates position limits, spread filters, stale order detection (500ms), affordability checks, 50% max drawdown auto-stop, average cost tracking, and dynamic exit/hold targeting.
+- **Risk Management:** Incorporates position limits, spread filters (15bps max), stale order detection (10s), affordability checks, 50% max drawdown auto-stop, average cost tracking, and dynamic exit/hold targeting with 50bps profit target, 60bps stop loss, and 300s max hold time.
 - **Dynamic Pair Selection:** A `PairScanner` component tracks volatility and spread for all 8 supported pairs, scoring them and dynamically selecting the most tradeable pairs with a 60-second hysteresis and 1.5x switch threshold.
 - **Asynchronous Architecture:** Utilizes `asyncio` for efficient handling of WebSocket data streams and concurrent operations.
 - **Telegram Integration:** Provides rate-limited (60s) PnL updates, critical alerts (5s cooldown) for events like drawdown stops or disconnections, and daily summaries.
@@ -29,7 +29,10 @@ The core system is built with Python 3.11 using an `asyncio` architecture for no
 - **Market Making Strategy:** Orders are placed around the volume-weighted microprice, with inventory-skewed pricing to manage position risk.
 - **Momentum Filter:** An EMA-based trend detection mechanism prevents trades against strong market moves.
 - **Fill Cooldown:** A 200ms minimum delay between fills prevents rapid, cascading order executions.
-- **Order Placement:** All Kraken orders include the `post_only` flag to ensure maker fees and prevent accidental taker fills.
+- **Order Placement:** Entry orders use `post_only` flag for maker fees. Force exit orders (stop loss, time stop) use taker mode for faster fills.
+- **Per-Pair Order Management:** Each pair's OrderManager cancels only its own tracked orders via individual cancel_order calls, preventing interference between concurrent pairs.
+- **Dollar-Based Sizing:** Order quantities are dynamically computed to invest ~80% of allocated balance per trade, ensuring equal dollar exposure across pairs regardless of token price.
+- **Stranded Position Recovery:** On startup, any leftover crypto positions from previous runs are automatically detected and sold at market, with quantities rounded down to exchange minimum increments.
 - **Web Server:** A Flask application serves a dashboard and API, running in a background thread alongside the scalper.
 
 ## External Dependencies
