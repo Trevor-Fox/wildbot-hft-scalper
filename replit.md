@@ -20,7 +20,7 @@ The core system is built with Python 3.11 using an `asyncio` architecture for no
 - **Order Management:** Supports dual-mode operation:
     - **Paper Trading:** Simulated fills for strategy testing.
     - **Live Trading:** Real order placement and cancellation on Kraken via REST API with HMAC-SHA512 authentication and 1-second rate limiting per API call. Includes strict affordability checks and automatic fallback to paper mode on API connection failure.
-- **Risk Management:** Incorporates position limits, spread filters (15bps max), stale order detection (10s), affordability checks, 50% max drawdown auto-stop, average cost tracking, and dynamic exit/hold targeting with 50bps profit target, 60bps stop loss, and 300s max hold time.
+- **Risk Management:** Incorporates position limits, spread filters (15bps max), stale order detection (10s), affordability checks, 50% max drawdown auto-stop, average cost tracking, and dynamic exit/hold targeting with decaying profit targets (3-phase: full target → decay to maker fee → minimal offset), 35bps stop loss, 300s base hold time, and 8bps minimum volatility filter.
 - **Dynamic Pair Selection:** A `PairScanner` component tracks volatility and spread for all 8 supported pairs, scoring them and dynamically selecting the most tradeable pairs with a 60-second hysteresis and 1.5x switch threshold.
 - **Asynchronous Architecture:** Utilizes `asyncio` for efficient handling of WebSocket data streams and concurrent operations.
 - **Telegram Integration:** Provides rate-limited (60s) PnL updates, critical alerts (5s cooldown) for events like drawdown stops or disconnections, and daily summaries.
