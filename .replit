@@ -22,13 +22,12 @@ args = "WildBot HFT Scalper"
 name = "WildBot HFT Scalper"
 author = "agent"
 
+[workflows.workflow.metadata]
+outputType = "console"
+
 [[workflows.workflow.tasks]]
 task = "shell.exec"
-args = "python main.py"
-waitForPort = 5000
-
-[workflows.workflow.metadata]
-outputType = "webview"
+args = "echo \"Dev instance stopped. Production deployment is running.\""
 
 [deployment]
 deploymentTarget = "vm"
