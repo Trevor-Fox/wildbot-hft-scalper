@@ -53,8 +53,8 @@ class KrakenClient:
 
             now = time.time()
             elapsed = now - self._last_request_time
-            if elapsed < 1.0:
-                time.sleep(1.0 - elapsed)
+            if elapsed < 2.0:
+                time.sleep(2.0 - elapsed)
 
             with self._nonce_lock:
                 nonce = int(time.time() * 1_000_000_000)
