@@ -1739,6 +1739,32 @@ class PairTrader:
                 self.orders._filled_during_cancel.clear()
             if self.orders._needs_balance_sync:
                 self.orders._needs_balance_sync = False
+                if self._kraken:
+                    try:
+                        balances = self._kraken.get_balance()
+                        asset = self.config.symbol.split("/")[0]
+                        asset_keys = ASSET_KEYS_MAP.get(asset, [asset])
+                        actual_bal = 0.0
+                        for k in asset_keys:
+                            if k in balances:
+                                actual_bal = float(balances[k])
+                                break
+                        if actual_bal < self.risk._min_order_qty and self.risk.position >= self.risk._min_order_qty:
+                            logger.warning(f"BALANCE SYNC [{self.config.symbol}]: Kraken has {actual_bal} but tracker has {self.risk.position} — zeroing position")
+                            self.risk.position = 0
+                            self.risk._position_entry_time = 0
+                            self.risk.avg_entry_price = 0
+                            self._force_exit_fail_count = 0
+                        elif actual_bal >= self.risk._min_order_qty and abs(actual_bal - self.risk.position) > self.risk._min_order_qty * 0.5:
+                            logger.warning(f"BALANCE SYNC [{self.config.symbol}]: Kraken has {actual_bal}, tracker has {self.risk.position} — syncing")
+                            self.risk.position = actual_bal
+                            self._force_exit_fail_count = 0
+                        usd_keys = ["ZUSD", "USD", "USDT", "ZUSDT", "USDC", "ZUSDC"]
+                        usd_bal = sum(float(balances.get(k, 0)) for k in usd_keys)
+                        if usd_bal > 0:
+                            logger.info(f"Balance synced [{self.config.symbol}]: position={actual_bal}, USDC=${usd_bal:.2f}")
+                    except Exception as exc:
+                        logger.warning(f"Balance sync failed [{self.config.symbol}]: {exc}")
         else:
             filled = self.orders.simulate_fill_check(self.tob)
 
