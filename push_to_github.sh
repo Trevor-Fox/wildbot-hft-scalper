@@ -19,6 +19,6 @@ if [ -z "$TOKEN" ]; then
 fi
 
 git remote set-url origin "https://x-access-token:${TOKEN}@github.com/Trevor-Fox/wildbot-hft-scalper.git"
-git push -u origin main
+git push --force -u origin main
 git remote set-url origin "https://github.com/Trevor-Fox/wildbot-hft-scalper.git"
 echo "Done! Pushed to GitHub successfully."
