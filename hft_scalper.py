@@ -816,6 +816,7 @@ class HFTScalper:
         self._last_force_exit_time: float = 0.0
         self._force_exit_order_time: float = 0.0
         self._force_exit_fail_count: int = 0
+        self._last_balance_sync_time: float = 0
         self._post_exit_cooldown: float = 120.0
 
     @property
@@ -1059,6 +1060,10 @@ class HFTScalper:
                     if result is None:
                         self._force_exit_fail_count += 1
                         if self._force_exit_fail_count >= 5:
+                            now_sync = time.monotonic()
+                            if now_sync - self._last_balance_sync_time < 60:
+                                return
+                            self._last_balance_sync_time = now_sync
                             try:
                                 balances = self._kraken.get_balance()
                                 asset = self.config.symbol.split("/")[0]
@@ -1132,6 +1137,10 @@ class HFTScalper:
                     if result is None:
                         self._force_exit_fail_count += 1
                         if self._force_exit_fail_count >= 5:
+                            now_sync = time.monotonic()
+                            if now_sync - self._last_balance_sync_time < 60:
+                                return
+                            self._last_balance_sync_time = now_sync
                             try:
                                 balances = self._kraken.get_balance()
                                 asset = self.config.symbol.split("/")[0]
@@ -1622,6 +1631,7 @@ class PairTrader:
         self._last_force_exit_time: float = 0.0
         self._force_exit_order_time: float = 0.0
         self._force_exit_fail_count: int = 0
+        self._last_balance_sync_time: float = 0
         self._post_exit_cooldown: float = 120.0
         self._allocated_balance: float = allocated_balance
         self._qty_sized: bool = False
@@ -1827,6 +1837,10 @@ class PairTrader:
                     if result is None:
                         self._force_exit_fail_count += 1
                         if self._force_exit_fail_count >= 5:
+                            now_sync = time.monotonic()
+                            if now_sync - self._last_balance_sync_time < 60:
+                                return
+                            self._last_balance_sync_time = now_sync
                             try:
                                 balances = self._kraken.get_balance()
                                 asset = self.config.symbol.split("/")[0]
@@ -1900,6 +1914,10 @@ class PairTrader:
                     if result is None:
                         self._force_exit_fail_count += 1
                         if self._force_exit_fail_count >= 5:
+                            now_sync = time.monotonic()
+                            if now_sync - self._last_balance_sync_time < 60:
+                                return
+                            self._last_balance_sync_time = now_sync
                             try:
                                 balances = self._kraken.get_balance()
                                 asset = self.config.symbol.split("/")[0]
