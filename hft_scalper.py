@@ -335,6 +335,7 @@ class RiskManager:
         self.fees_paid: float = 0.0
         self._position_entry_time: float = 0.0
         self._dust_qty: float = config.order_qty / 10
+        self._min_order_qty: float = config.order_qty
 
     def unrealized_pnl(self, mid_price: float) -> float:
         if self.position == 0 or self.avg_entry_price == 0:
@@ -353,6 +354,9 @@ class RiskManager:
         return 0.0
 
     def can_place_buy(self, price: float) -> bool:
+        if self.config.live_mode and 0 < self.position < self._min_order_qty:
+            cost = price * self.config.order_qty
+            return cost <= self.balance
         position_ok = self.position + self.config.order_qty <= self.config.max_position
         cost = price * self.config.order_qty
         if self.config.live_mode:
@@ -362,9 +366,9 @@ class RiskManager:
         return position_ok and affordable
 
     def can_place_sell(self) -> bool:
-        position_ok = self.position - self.config.order_qty >= -self.config.max_position
-        if self.config.live_mode and self.position < self._dust_qty:
+        if self.config.live_mode and self.position < self._min_order_qty:
             return False
+        position_ok = self.position - self.config.order_qty >= -self.config.max_position
         return position_ok
 
     def is_spread_acceptable(self, tob: TopOfBook) -> bool:
@@ -440,7 +444,7 @@ class RiskManager:
             self._close_trip()
             self.avg_entry_price = 0.0
             self._position_entry_time = 0.0
-        elif was_flat:
+        elif was_flat or abs(old_pos) < self._min_order_qty:
             self._position_entry_time = time.monotonic()
 
         dec = self.config.price_decimals
@@ -484,12 +488,14 @@ class RiskManager:
         mid = tob.microprice
 
         dec = self.config.price_decimals
-        if self.position > self._dust_qty:
+        has_sellable_position = self.position >= self._min_order_qty
+        has_buyable_short = self.position <= -self._min_order_qty
+        if has_sellable_position:
             exit_bps = self.dynamic_exit_bps(volatility_bps, hold_pct)
             exit_offset = mid * exit_bps / 10_000
             buy_price = None
             sell_price = round(max(self.avg_entry_price + exit_offset, tob.best_ask), dec)
-        elif self.position < -self._dust_qty:
+        elif has_buyable_short:
             exit_bps = self.dynamic_exit_bps(volatility_bps, hold_pct)
             exit_offset = mid * exit_bps / 10_000
             buy_price = round(min(self.avg_entry_price - exit_offset, tob.best_bid), dec)
@@ -844,6 +850,7 @@ class HFTScalper:
         self.config.order_qty = new_pair.min_qty
         self.config.max_position = new_pair.min_qty * 100
         self.risk._dust_qty = new_pair.min_qty / 10
+        self.risk._min_order_qty = new_pair.min_qty
         self.orders._rest_pair = new_pair.rest_pair
         self.config.price_decimals = new_pair.price_decimals
         self.orders._price_decimals = new_pair.price_decimals
@@ -993,7 +1000,8 @@ class HFTScalper:
                 )
             return
 
-        if not self.risk.is_spread_acceptable(self.tob):
+        spread_ok = self.risk.is_spread_acceptable(self.tob)
+        if not spread_ok and abs(self.risk.position) < self.risk._min_order_qty:
             self._status_reason = "spread_wide"
             if self.orders.open_count > 0:
                 self.orders.cancel_all()
@@ -1002,7 +1010,7 @@ class HFTScalper:
 
         now_mono = time.monotonic()
         reprice_after = 30.0
-        if abs(self.risk.position) > self.risk._dust_qty and self.risk._position_entry_time > 0:
+        if abs(self.risk.position) >= self.risk._min_order_qty and self.risk._position_entry_time > 0:
             hold_time = now_mono - self.risk._position_entry_time
             dynamic_hold = self.risk.dynamic_hold_seconds(self._volatility_bps)
             if hold_time > dynamic_hold:
@@ -1039,7 +1047,7 @@ class HFTScalper:
                 self._status_reason = "time_stop"
                 return
 
-        if abs(self.risk.position) > self.risk._dust_qty and self.risk.avg_entry_price > 0:
+        if abs(self.risk.position) >= self.risk._min_order_qty and self.risk.avg_entry_price > 0:
             mid = self.tob.mid_price
             if self.risk.position > 0:
                 adverse_bps = (self.risk.avg_entry_price - mid) / self.risk.avg_entry_price * 10_000
@@ -1139,6 +1147,7 @@ class HFTScalper:
 
         if (
             place_buy
+            and spread_ok
             and not self.orders.has_side(OrderSide.BUY)
             and self.risk.can_place_buy(buy_price)
             and self.orders.open_count < self.config.max_open_orders
@@ -1617,6 +1626,7 @@ class PairTrader:
         self.config.order_qty = order_qty
         self.config.max_position = order_qty
         self.risk._dust_qty = min_qty / 10
+        self.risk._min_order_qty = min_qty
         logger.info(f"[{self.config.symbol}] Sized order: {order_qty} units (~${order_qty * mid:.2f} notional) at mid=${mid:.4f}")
 
     def _handle_tick_inner(self):
@@ -1693,7 +1703,8 @@ class PairTrader:
                 )
             return
 
-        if not self.risk.is_spread_acceptable(self.tob):
+        spread_ok = self.risk.is_spread_acceptable(self.tob)
+        if not spread_ok and abs(self.risk.position) < self.risk._min_order_qty:
             self._status_reason = "spread_wide"
             if self.orders.open_count > 0:
                 self.orders.cancel_all()
@@ -1701,7 +1712,7 @@ class PairTrader:
 
         now_mono = time.monotonic()
         reprice_after = 30.0
-        if abs(self.risk.position) > self.risk._dust_qty and self.risk._position_entry_time > 0:
+        if abs(self.risk.position) >= self.risk._min_order_qty and self.risk._position_entry_time > 0:
             hold_time = now_mono - self.risk._position_entry_time
             dynamic_hold = self.risk.dynamic_hold_seconds(self._volatility_bps)
             if hold_time > dynamic_hold:
@@ -1738,7 +1749,7 @@ class PairTrader:
                 self._status_reason = "time_stop"
                 return
 
-        if abs(self.risk.position) > self.risk._dust_qty and self.risk.avg_entry_price > 0:
+        if abs(self.risk.position) >= self.risk._min_order_qty and self.risk.avg_entry_price > 0:
             mid = self.tob.mid_price
             if self.risk.position > 0:
                 adverse_bps = (self.risk.avg_entry_price - mid) / self.risk.avg_entry_price * 10_000
@@ -1828,6 +1839,7 @@ class PairTrader:
 
         if (
             place_buy
+            and spread_ok
             and not self.orders.has_side(OrderSide.BUY)
             and self.risk.can_place_buy(buy_price)
             and self.orders.open_count < self.config.max_open_orders
@@ -1902,6 +1914,8 @@ class MultiPairOrchestrator:
         self.active_traders: dict[str, PairTrader] = {}
         self.total_balance: float = base_config.starting_capital
         self._initial_capital: float = base_config.starting_capital
+        self._usdc_available: float = 0.0
+        self._dust_positions: dict = {}
         self._running: bool = False
         self._update_count: int = 0
         self._trade_history: list[dict] = []
@@ -1913,17 +1927,23 @@ class MultiPairOrchestrator:
     def _allocate_balance(self):
         with self._traders_lock:
             usable = self.total_balance * 0.98
-            position_value = 0.0
+            locked_value = 0.0
             for trader in self.active_traders.values():
-                if abs(trader.risk.position) > trader.risk._dust_qty:
-                    position_value += trader.risk.equity(trader.tob.mid_price)
-            free_cash = max(0, usable - position_value)
-            flat_count = sum(1 for t in self.active_traders.values() if abs(t.risk.position) <= t.risk._dust_qty)
-            if flat_count == 0:
+                if trader.risk.position >= trader.risk._min_order_qty:
+                    locked_value += abs(trader.risk.position) * trader.tob.mid_price
+                for oid, order in trader.orders.open_orders.items():
+                    if order.side == OrderSide.BUY and order.status == OrderStatus.OPEN:
+                        locked_value += order.price * order.quantity
+            free_cash = max(0, usable - locked_value)
+            need_alloc = sum(
+                1 for t in self.active_traders.values()
+                if t.risk.position < t.risk._min_order_qty and t.orders.open_count == 0
+            )
+            if need_alloc == 0:
                 return
-            per_flat = free_cash / flat_count
+            per_flat = free_cash / need_alloc
             for trader in self.active_traders.values():
-                if abs(trader.risk.position) <= trader.risk._dust_qty:
+                if trader.risk.position < trader.risk._min_order_qty and trader.orders.open_count == 0:
                     trader.risk.balance = per_flat
                     trader.risk.starting_capital = per_flat
                     trader.risk.peak_equity = per_flat
@@ -1952,7 +1972,14 @@ class MultiPairOrchestrator:
         with self._traders_lock:
             if pair_config.ws_symbol in self.active_traders:
                 return
-        per_pair_balance = (self.total_balance * 0.98) / self.max_active_pairs
+            remaining_slots = max(1, self.max_active_pairs - len(self.active_traders))
+        per_pair_balance = min(
+            (self.total_balance * 0.98) / self.max_active_pairs,
+            (self._usdc_available * 0.95) / remaining_slots
+        )
+        if per_pair_balance < 1.0:
+            logger.warning(f"Skipping {pair_config.ws_symbol}: insufficient USDC (${self._usdc_available:.2f} available)")
+            return
         trader = PairTrader(
             pair_config=pair_config,
             base_config=self.base_config,
@@ -1971,8 +1998,18 @@ class MultiPairOrchestrator:
                     trader._ema = scanner_tob.mid_price
         with self._traders_lock:
             self.active_traders[pair_config.ws_symbol] = trader
+            self._usdc_available = max(0, self._usdc_available - per_pair_balance)
         logger.info(f"ACTIVATED pair {pair_config.ws_symbol} with ${per_pair_balance:.2f} allocated")
         trader._activation_time = time.monotonic()
+        asset_name = pair_config.display_name
+        if asset_name in self._dust_positions:
+            dust_qty, dust_cfg = self._dust_positions[asset_name]
+            if dust_qty > 0 and trader.tob.mid_price > 0:
+                trader.risk.position = dust_qty
+                trader.risk.avg_entry_price = trader.tob.mid_price
+                trader.risk._position_entry_time = time.monotonic()
+                logger.info(f"Absorbed dust {asset_name}: {dust_qty} into {pair_config.ws_symbol} trader")
+                del self._dust_positions[asset_name]
 
     def _deactivate_pair(self, ws_symbol: str):
         with self._traders_lock:
@@ -2248,6 +2285,15 @@ class MultiPairOrchestrator:
                         except Exception as e:
                             logger.warning(f"Failed to sell stranded {asset_name}: {e}")
                             failed_assets.append(asset_name)
+
+            for asset_name, keys in asset_keys_map.items():
+                asset_bal = sum(balances.get(k, 0.0) for k in keys)
+                pair_cfg = next((p for p in SCAN_PAIRS if p.display_name == asset_name), None)
+                min_qty = pair_cfg.min_qty if pair_cfg else 0.0001
+                if 0 < asset_bal < min_qty:
+                    self._dust_positions[asset_name] = (asset_bal, pair_cfg)
+                    logger.info(f"Dust {asset_name}: {asset_bal} (below min {min_qty})")
+
             for asset_name in failed_assets:
                 keys = asset_keys_map[asset_name]
                 asset_bal = sum(balances.get(k, 0.0) for k in keys)
@@ -2279,6 +2325,7 @@ class MultiPairOrchestrator:
                         logger.warning(f"Retry failed for stranded {asset_name}: {e}")
 
             self.total_balance = usd_bal
+            self._usdc_available = usd_bal
             self._initial_capital = usd_bal
             logger.info(f"LIVE MODE MultiPair initialized | Total USD=${usd_bal:,.2f}")
             self.telegram.send_alert(
@@ -2313,6 +2360,7 @@ class MultiPairOrchestrator:
                         crypto_value += abs(trader.risk.position) * trader.tob.mid_price
             old_total = self.total_balance
             self.total_balance = usd_bal + crypto_value
+            self._usdc_available = usd_bal
             self._allocate_balance()
             new_total = usd_bal + crypto_value
             if abs(new_total - old_total) > 0.01:

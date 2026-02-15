@@ -33,7 +33,18 @@ The core system is built with Python 3.11 using an `asyncio` architecture for no
 - **Per-Pair Order Management:** Each pair's OrderManager cancels only its own tracked orders via individual cancel_order calls, preventing interference between concurrent pairs.
 - **Dollar-Based Sizing:** Order quantities are dynamically computed to invest ~80% of allocated balance per trade, ensuring equal dollar exposure across pairs regardless of token price.
 - **Stranded Position Recovery:** On startup, any leftover crypto positions from previous runs are automatically detected and sold at market, with quantities rounded down to exchange minimum increments.
+- **Dust Position Handling:** Sub-minimum positions (below exchange min order qty) are tracked as dust and absorbed into traders when their pair activates. Pricing treats sub-minimum positions as "flat" (generates both buy/sell prices) since they can't be sold independently. Balance allocation excludes sub-minimum position value from locked funds.
+- **Smart Spread Filter:** When holding a position, the spread filter only suppresses new entry orders during wide spreads but preserves exit orders. When flat, wide spreads cancel all orders and pause trading.
+- **Balance Allocation:** Tracks funds locked by sellable positions and open buy orders. Remaining free cash is distributed equally among traders needing allocation (sub-minimum position with no open orders). USDC available is decremented after each pair activation to prevent over-allocation.
 - **Web Server:** A Flask application serves a dashboard and API, running in a background thread alongside the scalper.
+
+## Recent Changes (Feb 15, 2026)
+- Fixed pricing dead zone: sub-minimum positions no longer block order placement
+- Fixed balance allocation double-counting via equity() — now uses position value only
+- Fixed spread filter cancelling exit orders during brief spread spikes
+- Fixed position entry time not resetting after dust absorption + buy fill
+- Fixed USDC over-allocation when multiple pairs activate simultaneously
+- Achieved profitable round-trip trades (DOGE: +$0.7252 after fees)
 
 ## External Dependencies
 - **Kraken Exchange:**
