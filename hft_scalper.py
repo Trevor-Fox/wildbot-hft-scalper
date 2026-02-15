@@ -229,6 +229,9 @@ class PairScanner:
             if len(self._price_histories[ws_sym]) < 20:
                 continue
 
+            if vol < min_edge * 0.5:
+                continue
+
             score = vol - spread * 0.1
 
             candidates.append((ws_sym, pair_cfg, vol, spread, score))
@@ -299,13 +302,13 @@ class ScalperConfig:
     maker_fee_bps: float = 16.0
     min_profit_bps: float = 2.0
     requote_threshold_bps: float = 15.0
-    min_volatility_bps: float = 3.0
+    min_volatility_bps: float = 8.0
     volatility_window: int = 100
     max_hold_seconds: float = 300.0
-    stop_loss_bps: float = 60.0
+    stop_loss_bps: float = 35.0
     volatility_exit_multiplier: float = 1.2
     min_hold_seconds: float = 30.0
-    base_hold_seconds: float = 600.0
+    base_hold_seconds: float = 300.0
     max_hold_scaling: float = 3.0
     target_exit_bps: float = 50.0
     price_decimals: int = 1
@@ -448,28 +451,46 @@ class RiskManager:
             f"avg_entry={self.avg_entry_price:.{dec}f}"
         )
 
-    def dynamic_exit_bps(self, volatility_bps: float) -> float:
+    def dynamic_exit_bps(self, volatility_bps: float, hold_pct: float = 0.0) -> float:
+        """Exit target that decays over hold time to avoid costly time stops.
+        
+        hold_pct: 0.0 = just entered, 1.0 = at time stop threshold
+        Phase 1 (0-40%): Full target - seek profit
+        Phase 2 (40-75%): Decay to maker_fee - accept smaller loss over time stop 
+        Phase 3 (75-100%): Decay toward minimal offset - just get out
+        """
         fee_floor = (self.config.maker_fee_bps * 2) + self.config.min_profit_bps
         vol_target = volatility_bps * self.config.volatility_exit_multiplier
-        return max(fee_floor, vol_target)
+        full_target = max(fee_floor, vol_target)
+        
+        if hold_pct <= 0.4:
+            return full_target
+        elif hold_pct <= 0.75:
+            decay = (hold_pct - 0.4) / 0.35
+            min_target = self.config.maker_fee_bps
+            return full_target - decay * (full_target - min_target)
+        else:
+            decay = (hold_pct - 0.75) / 0.25
+            return max(3.0, self.config.maker_fee_bps * (1 - decay * 0.8))
 
-    def dynamic_hold_seconds(self, exit_bps: float) -> float:
+    def dynamic_hold_seconds(self, volatility_bps: float) -> float:
+        full_exit_bps = self.dynamic_exit_bps(volatility_bps, hold_pct=0.0)
         fee_floor = (self.config.maker_fee_bps * 2) + self.config.min_profit_bps
-        ratio = exit_bps / fee_floor if fee_floor > 0 else 1.0
+        ratio = full_exit_bps / fee_floor if fee_floor > 0 else 1.0
         hold = self.config.base_hold_seconds * ratio
         return max(self.config.min_hold_seconds, min(hold, self.config.base_hold_seconds * self.config.max_hold_scaling))
 
-    def calculate_skewed_prices(self, tob: TopOfBook, volatility_bps: float = 0.0) -> tuple[float | None, float | None]:
+    def calculate_skewed_prices(self, tob: TopOfBook, volatility_bps: float = 0.0, hold_pct: float = 0.0) -> tuple[float | None, float | None]:
         mid = tob.microprice
 
         dec = self.config.price_decimals
         if self.position > self._dust_qty:
-            exit_bps = self.dynamic_exit_bps(volatility_bps)
+            exit_bps = self.dynamic_exit_bps(volatility_bps, hold_pct)
             exit_offset = mid * exit_bps / 10_000
             buy_price = None
             sell_price = round(max(self.avg_entry_price + exit_offset, tob.best_ask), dec)
         elif self.position < -self._dust_qty:
-            exit_bps = self.dynamic_exit_bps(volatility_bps)
+            exit_bps = self.dynamic_exit_bps(volatility_bps, hold_pct)
             exit_offset = mid * exit_bps / 10_000
             buy_price = round(min(self.avg_entry_price - exit_offset, tob.best_bid), dec)
             sell_price = None
@@ -983,7 +1004,7 @@ class HFTScalper:
         reprice_after = 30.0
         if abs(self.risk.position) > self.risk._dust_qty and self.risk._position_entry_time > 0:
             hold_time = now_mono - self.risk._position_entry_time
-            dynamic_hold = self.risk.dynamic_hold_seconds(self.risk.dynamic_exit_bps(self._volatility_bps))
+            dynamic_hold = self.risk.dynamic_hold_seconds(self._volatility_bps)
             if hold_time > dynamic_hold:
                 exit_side = OrderSide.SELL if self.risk.position > 0 else OrderSide.BUY
                 has_exit_order = any(o.side == exit_side for o in self.orders.open_orders.values())
@@ -1068,7 +1089,12 @@ class HFTScalper:
                 self.orders.cancel_all()
                 self._switch_pair(best)
 
-        buy_price, sell_price = self.risk.calculate_skewed_prices(self.tob, self._volatility_bps)
+        hold_pct = 0.0
+        if abs(self.risk.position) > self.risk._dust_qty and self.risk._position_entry_time > 0:
+            ht = now_mono - self.risk._position_entry_time
+            max_hold = self.risk.dynamic_hold_seconds(self._volatility_bps)
+            hold_pct = min(ht / max_hold, 1.0) if max_hold > 0 else 0.0
+        buy_price, sell_price = self.risk.calculate_skewed_prices(self.tob, self._volatility_bps, hold_pct)
         momentum = self.momentum_signal
 
         requote_thresh = self.tob.mid_price * self.config.requote_threshold_bps / 10_000
@@ -1677,7 +1703,7 @@ class PairTrader:
         reprice_after = 30.0
         if abs(self.risk.position) > self.risk._dust_qty and self.risk._position_entry_time > 0:
             hold_time = now_mono - self.risk._position_entry_time
-            dynamic_hold = self.risk.dynamic_hold_seconds(self.risk.dynamic_exit_bps(self._volatility_bps))
+            dynamic_hold = self.risk.dynamic_hold_seconds(self._volatility_bps)
             if hold_time > dynamic_hold:
                 exit_side = OrderSide.SELL if self.risk.position > 0 else OrderSide.BUY
                 has_exit_order = any(o.side == exit_side for o in self.orders.open_orders.values())
@@ -1752,7 +1778,12 @@ class PairTrader:
                 self._status_reason = "stop_loss"
                 return
 
-        buy_price, sell_price = self.risk.calculate_skewed_prices(self.tob, self._volatility_bps)
+        hold_pct = 0.0
+        if abs(self.risk.position) > self.risk._dust_qty and self.risk._position_entry_time > 0:
+            ht = now_mono - self.risk._position_entry_time
+            max_hold = self.risk.dynamic_hold_seconds(self._volatility_bps)
+            hold_pct = min(ht / max_hold, 1.0) if max_hold > 0 else 0.0
+        buy_price, sell_price = self.risk.calculate_skewed_prices(self.tob, self._volatility_bps, hold_pct)
         momentum = self.momentum_signal
 
         requote_thresh = self.tob.mid_price * self.config.requote_threshold_bps / 10_000
