@@ -121,6 +121,17 @@ SCAN_PAIRS = [
     PairConfig("ADA/USDC", "ADAUSDC", "ADA", 4.4, 6, 8),
 ]
 
+ASSET_KEYS_MAP = {
+    "BTC": ["XXBT", "XBT", "BTC"],
+    "ETH": ["XETH", "ETH"],
+    "SOL": ["SOL"],
+    "DOGE": ["DOGE", "XXDG"],
+    "XRP": ["XXRP", "XRP"],
+    "LINK": ["LINK"],
+    "AVAX": ["AVAX"],
+    "ADA": ["ADA"],
+}
+
 
 class OrderSide(Enum):
     BUY = "buy"
@@ -1026,19 +1037,52 @@ class HFTScalper:
                 dec = self.config.price_decimals
                 if self.risk.position > 0:
                     exit_price = round(self.tob.best_bid * 0.999, dec)
-                    result = self.orders.create_order(OrderSide.SELL, exit_price, abs(self.risk.position), force_taker=True)
+                    raw_qty = abs(self.risk.position)
+                    min_qty = self.risk._min_order_qty
+                    sell_qty = int(raw_qty / min_qty) * min_qty
+                    sell_qty = round(sell_qty, self.orders._qty_decimals)
+                    if sell_qty < min_qty:
+                        self._force_exit_fail_count = 0
+                        return
+                    result = self.orders.create_order(OrderSide.SELL, exit_price, sell_qty, force_taker=True)
                 elif self.risk.position < 0:
                     exit_price = round(self.tob.best_ask * 1.001, dec)
-                    result = self.orders.create_order(OrderSide.BUY, exit_price, abs(self.risk.position), force_taker=True)
+                    raw_qty = abs(self.risk.position)
+                    min_qty = self.risk._min_order_qty
+                    buy_qty = int(raw_qty / min_qty) * min_qty
+                    buy_qty = round(buy_qty, self.orders._qty_decimals)
+                    if buy_qty < min_qty:
+                        self._force_exit_fail_count = 0
+                        return
+                    result = self.orders.create_order(OrderSide.BUY, exit_price, buy_qty, force_taker=True)
                 if exit_price is not None:
                     if result is None:
                         self._force_exit_fail_count += 1
-                        if self._force_exit_fail_count >= 3:
-                            logger.warning(f"PHANTOM RESET: {self._force_exit_fail_count} failed exit attempts — resetting position tracker")
-                            self.risk.position = 0
-                            self.risk._position_entry_time = 0
-                            self.risk.avg_entry_price = 0
-                            self._force_exit_fail_count = 0
+                        if self._force_exit_fail_count >= 5:
+                            try:
+                                balances = self._kraken.get_balance()
+                                asset = self.config.symbol.split("/")[0]
+                                asset_keys = ASSET_KEYS_MAP.get(asset, [asset])
+                                actual_bal = 0.0
+                                for k in asset_keys:
+                                    if k in balances:
+                                        actual_bal = float(balances[k])
+                                        break
+                                if actual_bal >= self.risk._min_order_qty:
+                                    logger.warning(f"POSITION SYNCED: actual balance {actual_bal} >= min_order_qty, updating position tracker")
+                                    self.risk.position = actual_bal
+                                    self._force_exit_fail_count = 0
+                                    self.risk.peak_equity = self.risk.equity(self.tob.mid_price)
+                                    self.risk.max_drawdown_pct_seen = 0.0
+                                    self.risk._drawdown_logged = False
+                                else:
+                                    logger.warning(f"PHANTOM RESET: actual balance {actual_bal} < min_order_qty, zeroing position tracker")
+                                    self.risk.position = 0
+                                    self.risk._position_entry_time = 0
+                                    self.risk.avg_entry_price = 0
+                                    self._force_exit_fail_count = 0
+                            except Exception as exc:
+                                logger.warning(f"Balance sync failed: {exc}")
                         return
                     self._force_exit_fail_count = 0
                     self._status_reason = "time_stop"
@@ -1066,19 +1110,52 @@ class HFTScalper:
                 dec = self.config.price_decimals
                 if self.risk.position > 0:
                     exit_price = round(self.tob.best_bid * 0.999, dec)
-                    result = self.orders.create_order(OrderSide.SELL, exit_price, abs(self.risk.position), force_taker=True)
+                    raw_qty = abs(self.risk.position)
+                    min_qty = self.risk._min_order_qty
+                    sell_qty = int(raw_qty / min_qty) * min_qty
+                    sell_qty = round(sell_qty, self.orders._qty_decimals)
+                    if sell_qty < min_qty:
+                        self._force_exit_fail_count = 0
+                        return
+                    result = self.orders.create_order(OrderSide.SELL, exit_price, sell_qty, force_taker=True)
                 elif self.risk.position < 0:
                     exit_price = round(self.tob.best_ask * 1.001, dec)
-                    result = self.orders.create_order(OrderSide.BUY, exit_price, abs(self.risk.position), force_taker=True)
+                    raw_qty = abs(self.risk.position)
+                    min_qty = self.risk._min_order_qty
+                    buy_qty = int(raw_qty / min_qty) * min_qty
+                    buy_qty = round(buy_qty, self.orders._qty_decimals)
+                    if buy_qty < min_qty:
+                        self._force_exit_fail_count = 0
+                        return
+                    result = self.orders.create_order(OrderSide.BUY, exit_price, buy_qty, force_taker=True)
                 if exit_price is not None:
                     if result is None:
                         self._force_exit_fail_count += 1
-                        if self._force_exit_fail_count >= 3:
-                            logger.warning(f"PHANTOM RESET: {self._force_exit_fail_count} failed exit attempts — resetting position tracker")
-                            self.risk.position = 0
-                            self.risk._position_entry_time = 0
-                            self.risk.avg_entry_price = 0
-                            self._force_exit_fail_count = 0
+                        if self._force_exit_fail_count >= 5:
+                            try:
+                                balances = self._kraken.get_balance()
+                                asset = self.config.symbol.split("/")[0]
+                                asset_keys = ASSET_KEYS_MAP.get(asset, [asset])
+                                actual_bal = 0.0
+                                for k in asset_keys:
+                                    if k in balances:
+                                        actual_bal = float(balances[k])
+                                        break
+                                if actual_bal >= self.risk._min_order_qty:
+                                    logger.warning(f"POSITION SYNCED: actual balance {actual_bal} >= min_order_qty, updating position tracker")
+                                    self.risk.position = actual_bal
+                                    self._force_exit_fail_count = 0
+                                    self.risk.peak_equity = self.risk.equity(self.tob.mid_price)
+                                    self.risk.max_drawdown_pct_seen = 0.0
+                                    self.risk._drawdown_logged = False
+                                else:
+                                    logger.warning(f"PHANTOM RESET: actual balance {actual_bal} < min_order_qty, zeroing position tracker")
+                                    self.risk.position = 0
+                                    self.risk._position_entry_time = 0
+                                    self.risk.avg_entry_price = 0
+                                    self._force_exit_fail_count = 0
+                            except Exception as exc:
+                                logger.warning(f"Balance sync failed: {exc}")
                         return
                     self._force_exit_fail_count = 0
                     self._status_reason = "stop_loss"
@@ -1615,7 +1692,7 @@ class PairTrader:
         mid = self.tob.mid_price
         if mid <= 0:
             return
-        target_notional = self._allocated_balance * 0.80
+        target_notional = self._allocated_balance * 0.60
         raw_qty = target_notional / mid
         min_qty = self.pair_config.min_qty
         dec = self.pair_config.qty_decimals
@@ -1728,19 +1805,52 @@ class PairTrader:
                 dec = self.config.price_decimals
                 if self.risk.position > 0:
                     exit_price = round(self.tob.best_bid * 0.999, dec)
-                    result = self.orders.create_order(OrderSide.SELL, exit_price, abs(self.risk.position), force_taker=True)
+                    raw_qty = abs(self.risk.position)
+                    min_qty = self.risk._min_order_qty
+                    sell_qty = int(raw_qty / min_qty) * min_qty
+                    sell_qty = round(sell_qty, self.orders._qty_decimals)
+                    if sell_qty < min_qty:
+                        self._force_exit_fail_count = 0
+                        return
+                    result = self.orders.create_order(OrderSide.SELL, exit_price, sell_qty, force_taker=True)
                 elif self.risk.position < 0:
                     exit_price = round(self.tob.best_ask * 1.001, dec)
-                    result = self.orders.create_order(OrderSide.BUY, exit_price, abs(self.risk.position), force_taker=True)
+                    raw_qty = abs(self.risk.position)
+                    min_qty = self.risk._min_order_qty
+                    buy_qty = int(raw_qty / min_qty) * min_qty
+                    buy_qty = round(buy_qty, self.orders._qty_decimals)
+                    if buy_qty < min_qty:
+                        self._force_exit_fail_count = 0
+                        return
+                    result = self.orders.create_order(OrderSide.BUY, exit_price, buy_qty, force_taker=True)
                 if exit_price is not None:
                     if result is None:
                         self._force_exit_fail_count += 1
-                        if self._force_exit_fail_count >= 3:
-                            logger.warning(f"PHANTOM RESET [{self.config.symbol}]: {self._force_exit_fail_count} failed exit attempts — resetting position tracker")
-                            self.risk.position = 0
-                            self.risk._position_entry_time = 0
-                            self.risk.avg_entry_price = 0
-                            self._force_exit_fail_count = 0
+                        if self._force_exit_fail_count >= 5:
+                            try:
+                                balances = self._kraken.get_balance()
+                                asset = self.config.symbol.split("/")[0]
+                                asset_keys = ASSET_KEYS_MAP.get(asset, [asset])
+                                actual_bal = 0.0
+                                for k in asset_keys:
+                                    if k in balances:
+                                        actual_bal = float(balances[k])
+                                        break
+                                if actual_bal >= self.risk._min_order_qty:
+                                    logger.warning(f"POSITION SYNCED [{self.config.symbol}]: actual balance {actual_bal} >= min_order_qty, updating position tracker")
+                                    self.risk.position = actual_bal
+                                    self._force_exit_fail_count = 0
+                                    self.risk.peak_equity = self.risk.equity(self.tob.mid_price)
+                                    self.risk.max_drawdown_pct_seen = 0.0
+                                    self.risk._drawdown_logged = False
+                                else:
+                                    logger.warning(f"PHANTOM RESET [{self.config.symbol}]: actual balance {actual_bal} < min_order_qty, zeroing position tracker")
+                                    self.risk.position = 0
+                                    self.risk._position_entry_time = 0
+                                    self.risk.avg_entry_price = 0
+                                    self._force_exit_fail_count = 0
+                            except Exception as exc:
+                                logger.warning(f"Balance sync failed [{self.config.symbol}]: {exc}")
                         return
                     self._force_exit_fail_count = 0
                     self._status_reason = "time_stop"
@@ -1768,19 +1878,52 @@ class PairTrader:
                 dec = self.config.price_decimals
                 if self.risk.position > 0:
                     exit_price = round(self.tob.best_bid * 0.999, dec)
-                    result = self.orders.create_order(OrderSide.SELL, exit_price, abs(self.risk.position), force_taker=True)
+                    raw_qty = abs(self.risk.position)
+                    min_qty = self.risk._min_order_qty
+                    sell_qty = int(raw_qty / min_qty) * min_qty
+                    sell_qty = round(sell_qty, self.orders._qty_decimals)
+                    if sell_qty < min_qty:
+                        self._force_exit_fail_count = 0
+                        return
+                    result = self.orders.create_order(OrderSide.SELL, exit_price, sell_qty, force_taker=True)
                 elif self.risk.position < 0:
                     exit_price = round(self.tob.best_ask * 1.001, dec)
-                    result = self.orders.create_order(OrderSide.BUY, exit_price, abs(self.risk.position), force_taker=True)
+                    raw_qty = abs(self.risk.position)
+                    min_qty = self.risk._min_order_qty
+                    buy_qty = int(raw_qty / min_qty) * min_qty
+                    buy_qty = round(buy_qty, self.orders._qty_decimals)
+                    if buy_qty < min_qty:
+                        self._force_exit_fail_count = 0
+                        return
+                    result = self.orders.create_order(OrderSide.BUY, exit_price, buy_qty, force_taker=True)
                 if exit_price is not None:
                     if result is None:
                         self._force_exit_fail_count += 1
-                        if self._force_exit_fail_count >= 3:
-                            logger.warning(f"PHANTOM RESET [{self.config.symbol}]: {self._force_exit_fail_count} failed exit attempts — resetting position tracker")
-                            self.risk.position = 0
-                            self.risk._position_entry_time = 0
-                            self.risk.avg_entry_price = 0
-                            self._force_exit_fail_count = 0
+                        if self._force_exit_fail_count >= 5:
+                            try:
+                                balances = self._kraken.get_balance()
+                                asset = self.config.symbol.split("/")[0]
+                                asset_keys = ASSET_KEYS_MAP.get(asset, [asset])
+                                actual_bal = 0.0
+                                for k in asset_keys:
+                                    if k in balances:
+                                        actual_bal = float(balances[k])
+                                        break
+                                if actual_bal >= self.risk._min_order_qty:
+                                    logger.warning(f"POSITION SYNCED [{self.config.symbol}]: actual balance {actual_bal} >= min_order_qty, updating position tracker")
+                                    self.risk.position = actual_bal
+                                    self._force_exit_fail_count = 0
+                                    self.risk.peak_equity = self.risk.equity(self.tob.mid_price)
+                                    self.risk.max_drawdown_pct_seen = 0.0
+                                    self.risk._drawdown_logged = False
+                                else:
+                                    logger.warning(f"PHANTOM RESET [{self.config.symbol}]: actual balance {actual_bal} < min_order_qty, zeroing position tracker")
+                                    self.risk.position = 0
+                                    self.risk._position_entry_time = 0
+                                    self.risk.avg_entry_price = 0
+                                    self._force_exit_fail_count = 0
+                            except Exception as exc:
+                                logger.warning(f"Balance sync failed [{self.config.symbol}]: {exc}")
                         return
                     self._force_exit_fail_count = 0
                     self._status_reason = "stop_loss"
@@ -2003,12 +2146,19 @@ class MultiPairOrchestrator:
         trader._activation_time = time.monotonic()
         asset_name = pair_config.display_name
         if asset_name in self._dust_positions:
-            dust_qty, dust_cfg = self._dust_positions[asset_name]
-            if dust_qty > 0 and trader.tob.mid_price > 0:
-                trader.risk.position = dust_qty
+            absorbed_qty, dust_cfg = self._dust_positions[asset_name]
+            if absorbed_qty > 0 and trader.tob.mid_price > 0:
+                trader.risk.position = absorbed_qty
                 trader.risk.avg_entry_price = trader.tob.mid_price
                 trader.risk._position_entry_time = time.monotonic()
-                logger.info(f"Absorbed dust {asset_name}: {dust_qty} into {pair_config.ws_symbol} trader")
+                position_value = absorbed_qty * trader.tob.mid_price
+                if absorbed_qty >= pair_config.min_qty:
+                    trader.risk.balance = max(0, trader.risk.balance - position_value)
+                    trader.risk.starting_capital = trader.risk.balance + position_value
+                    trader.risk.peak_equity = trader.risk.starting_capital
+                    logger.info(f"Absorbed stranded {asset_name}: {absorbed_qty} (${position_value:.2f}) into {pair_config.ws_symbol} trader")
+                else:
+                    logger.info(f"Absorbed dust {asset_name}: {absorbed_qty} into {pair_config.ws_symbol} trader")
                 del self._dust_positions[asset_name]
 
     def _deactivate_pair(self, ws_symbol: str):
@@ -2233,26 +2383,22 @@ class MultiPairOrchestrator:
             try:
                 self._kraken.cancel_all()
                 logger.info("Cancelled any leftover orders on startup")
+                time.sleep(3)
             except Exception:
                 pass
 
-            asset_keys_map = {
-                "BTC": ["XXBT", "XBT", "BTC"],
-                "ETH": ["XETH", "ETH"],
-                "SOL": ["SOL"],
-                "DOGE": ["DOGE", "XXDG"],
-                "XRP": ["XXRP", "XRP"],
-                "LINK": ["LINK"],
-                "AVAX": ["AVAX"],
-                "ADA": ["ADA"],
-            }
+            balances = self._kraken.get_balance()
+            usd_bal = 0.0
+            for key in ["ZUSD", "USD", "USDT", "ZUSDT", "USDC", "ZUSDC"]:
+                if key in balances and balances[key] > 0:
+                    usd_bal += balances[key]
+
             pair_rest_map = {
                 "BTC": "XBTUSDC", "ETH": "ETHUSDC", "SOL": "SOLUSDC",
                 "DOGE": "DOGEUSDC", "XRP": "XRPUSDC", "LINK": "LINKUSDC",
                 "AVAX": "AVAXUSDC", "ADA": "ADAUSDC",
             }
-            failed_assets = []
-            for asset_name, keys in asset_keys_map.items():
+            for asset_name, keys in ASSET_KEYS_MAP.items():
                 asset_bal = sum(balances.get(k, 0.0) for k in keys)
                 if asset_bal > 0:
                     pair_cfg = next((p for p in SCAN_PAIRS if p.display_name == asset_name), None)
@@ -2284,45 +2430,16 @@ class MultiPairOrchestrator:
                                     usd_bal += balances[key]
                         except Exception as e:
                             logger.warning(f"Failed to sell stranded {asset_name}: {e}")
-                            failed_assets.append(asset_name)
+                            self._dust_positions[asset_name] = (asset_bal, pair_cfg)
+                            logger.info(f"Tracking unsold {asset_name}: {asset_bal} for absorption into trader")
 
-            for asset_name, keys in asset_keys_map.items():
+            for asset_name, keys in ASSET_KEYS_MAP.items():
                 asset_bal = sum(balances.get(k, 0.0) for k in keys)
                 pair_cfg = next((p for p in SCAN_PAIRS if p.display_name == asset_name), None)
                 min_qty = pair_cfg.min_qty if pair_cfg else 0.0001
-                if 0 < asset_bal < min_qty:
+                if 0 < asset_bal < min_qty and asset_name not in self._dust_positions:
                     self._dust_positions[asset_name] = (asset_bal, pair_cfg)
                     logger.info(f"Dust {asset_name}: {asset_bal} (below min {min_qty})")
-
-            for asset_name in failed_assets:
-                keys = asset_keys_map[asset_name]
-                asset_bal = sum(balances.get(k, 0.0) for k in keys)
-                pair_cfg = next((p for p in SCAN_PAIRS if p.display_name == asset_name), None)
-                min_qty = pair_cfg.min_qty if pair_cfg else 0.0001
-                if asset_bal >= min_qty:
-                    rest_pair = pair_rest_map.get(asset_name, f"{asset_name}USDC")
-                    logger.info(f"Retrying stranded {asset_name} sell: {asset_bal}")
-                    try:
-                        qty_dec = pair_cfg.qty_decimals if pair_cfg else 8
-                        sell_qty = int(asset_bal / min_qty) * min_qty
-                        sell_qty = round(sell_qty, qty_dec)
-                        qty_str = f"{sell_qty:.{qty_dec}f}"
-                        self._kraken.add_order(
-                            pair=rest_pair,
-                            side="sell",
-                            order_type="market",
-                            volume=qty_str,
-                            oflags="",
-                        )
-                        logger.info(f"Sold stranded {asset_name} (retry): {qty_str}")
-                        time.sleep(2)
-                        balances = self._kraken.get_balance()
-                        usd_bal = 0.0
-                        for key in ["ZUSD", "USD", "USDT", "ZUSDT", "USDC", "ZUSDC"]:
-                            if key in balances and balances[key] > 0:
-                                usd_bal += balances[key]
-                    except Exception as e:
-                        logger.warning(f"Retry failed for stranded {asset_name}: {e}")
 
             self.total_balance = usd_bal
             self._usdc_available = usd_bal
